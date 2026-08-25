@@ -154,6 +154,10 @@ const props = defineProps({
     type: String,
     default: null,
   },
+  databaseKey: {
+    type: String,
+    required: true,
+  },
 });
 
 const emit = defineEmits(['close', 'created']);
@@ -175,7 +179,7 @@ const variableLabels = computed(() => {
 });
 
 onMounted(() => {
-  templateStore.loadTemplates();
+  templateStore.loadTemplates(props.databaseKey);
 });
 
 function selectTemplate(id) {
@@ -201,9 +205,9 @@ function relativeTime(dateStr) {
 async function handleUseTemplate() {
   // Blank document — create empty note (same as + button)
   if (selectedTemplateId.value === '__blank__') {
-    const result = await structureStore.createFile('Untitled', props.currentFolderId);
+    const result = await structureStore.createFile(props.databaseKey, 'Untitled', props.currentFolderId);
     await structureStore.loadRootItems();
-    emit('created', result.id);
+    emit('created', result);
     return;
   }
 
@@ -266,10 +270,14 @@ async function createNoteFromTemplate(tpl, inputValues, folderId) {
   }
 
   const resolvedContent = resolveTemplateVariables(tpl.content, inputValues);
-  const result = await structureStore.createFile(noteTitle, folderId);
-  await structureStore.updateFileContent(result.id, resolvedContent);
+  const result = await structureStore.createFile(props.databaseKey, noteTitle, folderId);
+  await syncStore.repository(props.databaseKey).transaction(async (repo) => {
+    const now = new Date().toISOString();
+    await repo.exec('UPDATE notes SET content = ?, updated_at = ? WHERE id = ?', [resolvedContent, now, result.id]);
+    await repo.exec('UPDATE note_sync_base SET content = ?, updated_at = ? WHERE note_id = ?', [resolvedContent, now, result.id]);
+  });
   await structureStore.loadRootItems();
-  emit('created', result.id);
+  emit('created', result);
 }
 
 async function resolveTargetFolder(tpl) {
@@ -278,11 +286,11 @@ async function resolveTargetFolder(tpl) {
     const exists = await folderExists(tpl.defaultFolderId);
     if (exists) return tpl.defaultFolderId;
   }
-  return props.currentFolderId;
+  return props.currentFolderId === props.databaseKey ? null : props.currentFolderId;
 }
 
 async function folderExists(targetId) {
-  const rows = await syncStore.execute(
+  const rows = await syncStore.repository(props.databaseKey).execute(
     'SELECT COUNT(*) AS count FROM folders WHERE id = ?',
     [targetId],
   );

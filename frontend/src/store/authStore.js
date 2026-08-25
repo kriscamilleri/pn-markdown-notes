@@ -31,13 +31,13 @@ export const useAuthStore = defineStore('authStore', () => {
             // Refresh 5 minutes before expiry
             const refreshTime = Math.max(0, timeUntilExpiry - 5 * 60 * 1000);
             
-            console.log(`[Auth] Token expires in ${Math.round(timeUntilExpiry / 1000 / 60)} minutes, will refresh in ${Math.round(refreshTime / 1000 / 60)} minutes`);
+            console.info(`[Auth] Token expires in ${Math.round(timeUntilExpiry / 1000 / 60)} minutes, will refresh in ${Math.round(refreshTime / 1000 / 60)} minutes`);
             
             refreshTimer = setTimeout(async () => {
-                console.log('[Auth] Proactively refreshing token...');
+                console.info('[Auth] Proactively refreshing token...');
                 const success = await refreshToken();
                 if (success) {
-                    console.log('[Auth] Token refreshed successfully');
+                    console.info('[Auth] Token refreshed successfully');
                 } else {
                     console.warn('[Auth] Token refresh failed');
                 }

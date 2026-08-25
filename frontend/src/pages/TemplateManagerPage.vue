@@ -199,10 +199,12 @@ import { Pencil, Copy, Trash2, Plus, X } from 'lucide-vue-next';
 import AccountLayout from '@/components/AccountLayout.vue';
 import BaseButton from '@/components/BaseButton.vue';
 import { useTemplateStore } from '@/store/templateStore';
+import { useSyncStore } from '@/store/syncStore';
 import { useStructureStore } from '@/store/structureStore';
 import { useUiStore } from '@/store/uiStore';
 
 const templateStore = useTemplateStore();
+const syncStore = useSyncStore();
 const structureStore = useStructureStore();
 const uiStore = useUiStore();
 
@@ -316,6 +318,7 @@ async function handleSave() {
     const folderId = form.defaultFolderId || null;
     if (editingTemplate.value) {
       await templateStore.updateTemplate(
+        syncStore.personalDbKey,
         editingTemplate.value.id,
         form.name.trim(),
         form.content,
@@ -324,6 +327,7 @@ async function handleSave() {
       );
     } else {
       await templateStore.createTemplate(
+        syncStore.personalDbKey,
         form.name.trim(),
         form.content,
         form.titlePattern.trim(),
@@ -339,7 +343,7 @@ async function handleSave() {
 
 async function handleDuplicate(tpl) {
   try {
-    await templateStore.duplicateTemplate(tpl.id);
+    await templateStore.duplicateTemplate(syncStore.personalDbKey, tpl.id);
   } catch (err) {
     // Toast already shown in store
   }
@@ -349,13 +353,13 @@ async function handleDelete(tpl) {
   const confirmed = window.confirm(`Delete template "${tpl.name}"?`);
   if (!confirmed) return;
   try {
-    await templateStore.deleteTemplate(tpl.id);
+    await templateStore.deleteTemplate(syncStore.personalDbKey, tpl.id);
   } catch (err) {
     // Toast already shown in store
   }
 }
 
 onMounted(() => {
-  templateStore.loadTemplates();
+  templateStore.loadTemplates(syncStore.personalDbKey);
 });
 </script>

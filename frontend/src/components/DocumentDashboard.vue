@@ -39,7 +39,7 @@
         >
             <RecentDocumentCard
                 v-for="doc in continueWriting"
-                :key="doc.id"
+                :key="`${doc.dbKey}:${doc.id}`"
                 :document="doc"
                 :now="now"
                 @open="openDocument"
@@ -160,7 +160,7 @@
                 <ul class="divide-y divide-gray-100">
                     <RecentDocumentRow
                         v-for="doc in group.documents"
-                        :key="doc.id"
+                        :key="`${doc.dbKey}:${doc.id}`"
                         :document="doc"
                         :now="now"
                         @open="openDocument"
@@ -188,6 +188,7 @@
         <TemplatePickerModal
             v-if="showTemplatePicker"
             :current-folder-id="isGlobal ? null : folderId"
+            :database-key="isGlobal ? docStore.syncStore.personalDbKey : currentDbKey"
             @close="showTemplatePicker = false"
             @created="openDocument"
         />
@@ -237,6 +238,9 @@ const ui = useUiStore()
 
 const isGlobal = computed(() => props.folderId === RECENT_SCOPE || !props.folderId)
 const scopeKey = computed(() => (isGlobal.value ? 'recent' : props.folderId))
+const currentDbKey = computed(() => (
+    isGlobal.value ? null : docStore.selectedDbKey
+))
 
 const documents = ref([])
 const childFolders = ref([])
@@ -304,7 +308,11 @@ let loadToken = 0
 async function loadDocuments(token) {
     const rows = isGlobal.value
         ? await docStore.getRecentDocuments(DOCUMENT_LIMIT)
-        : await docStore.getFolderDocuments(props.folderId, DOCUMENT_LIMIT)
+        : await docStore.getFolderDocuments(
+            props.folderId === currentDbKey.value ? null : props.folderId,
+            currentDbKey.value,
+            DOCUMENT_LIMIT,
+        )
 
     if (token !== loadToken) return
 
@@ -321,8 +329,11 @@ async function loadFolderContext(token) {
     }
 
     const [nameRows, children] = await Promise.all([
-        docStore.syncStore.execute('SELECT name FROM folders WHERE id = ?', [props.folderId]),
-        docStore.getChildren(props.folderId),
+        props.folderId === currentDbKey.value
+            ? Promise.resolve([{ name: docStore.syncStore.databases.get(currentDbKey.value)?.name }])
+            : docStore.syncStore.repository(currentDbKey.value)
+                .execute('SELECT name FROM folders WHERE id = ?', [props.folderId]),
+        docStore.getChildren(props.folderId, currentDbKey.value),
     ])
 
     if (token !== loadToken) return
@@ -366,15 +377,15 @@ function clearFilters() {
     filter.value = FILTER_ALL
 }
 
-async function openDocument(fileId) {
-    draftStore.clearDraft(fileId)
-    await docStore.selectFile(fileId)
-    router.push({ name: 'doc', params: { fileId } })
+async function openDocument(document) {
+    draftStore.clearDraft(document.id)
+    await docStore.selectFile(document.id, document.dbKey)
+    router.push({ name: 'doc', params: { fileId: document.id }, query: { dbKey: document.dbKey } })
 }
 
-async function openFolder(folderId) {
-    await docStore.selectFolder(folderId)
-    router.push({ name: 'folder', params: { folderId } })
+async function openFolder(folder) {
+    await docStore.selectFolder(folder.id, folder.dbKey)
+    router.push({ name: 'folder', params: { folderId: folder.id }, query: { dbKey: folder.dbKey } })
 }
 
 /**
@@ -390,7 +401,7 @@ async function togglePin(doc) {
     documents.value[index] = { ...documents.value[index], isPinned: nextPinned }
 
     try {
-        await docStore.setDocumentPinned(doc.id, nextPinned)
+        await docStore.setDocumentPinned(doc.id, nextPinned, doc.dbKey)
     } catch (error) {
         console.error('Failed to update pin state:', error)
         const current = documents.value.findIndex((entry) => entry.id === doc.id)
@@ -422,12 +433,13 @@ async function confirmCreate() {
     if (!name) return
 
     try {
-        const parentId = isGlobal.value ? null : props.folderId
-        const created = await docStore.createFile(name, parentId)
+        const dbKey = isGlobal.value ? docStore.syncStore.personalDbKey : currentDbKey.value
+        const parentId = isGlobal.value || props.folderId === dbKey ? null : props.folderId
+        const created = await docStore.createFile(dbKey, name, parentId)
         if (created?.id) {
             draftStore.clearDraft(created.id)
-            await docStore.selectFile(created.id)
-            router.push({ name: 'doc', params: { fileId: created.id } })
+            await docStore.selectFile(created.id, created.dbKey)
+            router.push({ name: 'doc', params: { fileId: created.id }, query: { dbKey: created.dbKey } })
         }
     } catch (error) {
         console.error('Failed to create document:', error)

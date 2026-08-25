@@ -1,5 +1,6 @@
 <template>
     <div v-if="file">
+        <!-- `renderedHtml` is sanitized with DOMPurify below. -->
         <div
             class="mt-2"
             v-html="renderedHtml"

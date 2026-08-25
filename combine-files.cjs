@@ -154,7 +154,7 @@ function concatFiles(files, dest) {
   const files = getFiles(baseDir, fileTokens);
   concatFiles(files, outputFile);
 
-  console.log(`✅ Combined ${files.length} file(s) → ${outputFile}`);
+  console.info(`✅ Combined ${files.length} file(s) → ${outputFile}`);
 })().catch(err => {
   console.error('❌ Error:', err);
   process.exit(1);

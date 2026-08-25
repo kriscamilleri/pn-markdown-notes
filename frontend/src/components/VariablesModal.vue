@@ -139,14 +139,15 @@
 </template>
 
 <script setup>
-import { computed, ref } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { Plus, Pencil, Trash2 } from 'lucide-vue-next';
 import { useGlobalVariablesStore } from '@/store/globalVariablesStore';
 import { useUiStore } from '@/store/uiStore';
+import { useDocStore } from '@/store/docStore';
 import BaseModal from '@/components/BaseModal.vue';
 import BaseButton from '@/components/BaseButton.vue';
 
-defineProps({
+const props = defineProps({
     show: Boolean,
 });
 
@@ -154,6 +155,8 @@ defineEmits(['close']);
 
 const globalsStore = useGlobalVariablesStore();
 const uiStore = useUiStore();
+const docStore = useDocStore();
+const dbKey = computed(() => docStore.selectedDbKey || docStore.syncStore.personalDbKey);
 
 const nameInput = ref('');
 const valueInput = ref('');
@@ -188,10 +191,10 @@ async function saveVariable() {
         error.value = 'Name is required.';
         return;
     }
-    const success = await globalsStore.saveGlobalVariable(nameInput.value, valueInput.value || '');
+    const success = await globalsStore.saveGlobalVariable(dbKey.value, nameInput.value, valueInput.value || '');
     if (success) {
         if (editingKey.value && editingKey.value !== normalized) {
-            await globalsStore.deleteGlobalVariable(editingKey.value);
+            await globalsStore.deleteGlobalVariable(dbKey.value, editingKey.value);
         }
         uiStore.addToast(isEditing.value ? 'Variable updated.' : 'Variable added.', 'success');
         resetForm();
@@ -199,7 +202,7 @@ async function saveVariable() {
 }
 
 async function removeVariable(item) {
-    const success = await globalsStore.deleteGlobalVariable(item.key);
+    const success = await globalsStore.deleteGlobalVariable(dbKey.value, item.key);
     if (success) {
         uiStore.addToast('Variable deleted.', 'success');
         if (editingKey.value === item.key) {
@@ -207,4 +210,8 @@ async function removeVariable(item) {
         }
     }
 }
+
+watch(() => props.show, (show) => {
+    if (show && dbKey.value) globalsStore.loadGlobals(dbKey.value);
+}, { immediate: true });
 </script>

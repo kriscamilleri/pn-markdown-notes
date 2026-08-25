@@ -133,3 +133,23 @@ Editor toolbar: `pn-toolbar-button` (+ `pn-toolbar-button-tight`), `pn-toolbar-i
   that would fight this system if it were ever imported. Safe to delete.
 - `TemplateManagerPage`'s action column can overflow its card below ~1100px. The table
   scrolls (`pn-table-wrap`), so it is usable, but the column set is dense.
+
+## 6) Identity palette
+
+Colour is also used for **people**. That is a deliberate, documented exception to the
+Accent contract in §1, carved out by [COLLAB-03](../../specs/proposed/collab-03-identity-palette.md).
+
+1. Identity colours identify **people only** — avatars, presence dots, attribution marks,
+   remote selection tints.
+2. They are never used for a control, a state, a focus ring, progress, or a severity. Those
+   remain `gray-800`/`gray-900` and the `pn-alert-*` variants.
+3. They are never the sole carrier of meaning. Always paired with initials or a name.
+4. They are hard-coded hex, deliberately not remapped in dark mode — a person is the same
+   colour in both themes.
+5. New identity colours must pass the COLLAB-03 §3 thresholds against both surfaces and be
+   checked against `--pn-primary` and `--pn-accent` for confusability. Run
+   `node scripts/verify-identity-palette.cjs` to verify.
+
+The palette lives in `frontend/src/utils/identityColor.js`; the avatar primitives are
+`UserAvatar.vue` and `AvatarStack.vue`. Presence status (online/idle/offline) uses gray tones,
+not the identity palette.

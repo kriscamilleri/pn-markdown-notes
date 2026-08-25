@@ -4,4 +4,3 @@ export default function log(...data) {
         console.log("crsqlite-wasm: ", ...data);
     }
 }
-//# sourceMappingURL=log.js.map

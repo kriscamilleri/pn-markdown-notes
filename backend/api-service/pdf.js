@@ -25,19 +25,17 @@ import express from 'express';
 import puppeteer from 'puppeteer';
 import { JSDOM } from 'jsdom';
 import DOMPurify from 'dompurify';
-import path from 'path';
 import fs from 'fs';
 import { promises as dns } from 'dns';
-import { fileURLToPath } from 'url';
-import { getUserDb } from './db.js';
+import { getDb } from './db.js';
+import { resolveSpaceAccess } from './spaces.js';
+import { resolveStoredImagePath } from './spaceStorage.js';
 import { PDFDocument } from 'pdf-lib';
 
 export const pdfRoutes = express.Router();
 
 const window = new JSDOM('').window;
 const purify = DOMPurify(window);
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const UPLOADS_DIR = path.join(__dirname, 'uploads');
 
 const CONFIG = {
     EXTERNAL_IMAGE_TIMEOUT: 10000,
@@ -177,15 +175,49 @@ function isPrivateIp(ip) {
     return false;
 }
 
-function getInternalImageAsDataUri(imageId, userId) {
+export function parseInternalImageSource(source) {
     try {
-        const db = getUserDb(userId);
-        const image = db.prepare('SELECT mime_type, path FROM images WHERE id = ? AND user_id = ?').get(imageId, userId);
+        const decodedSource = String(source).replace(/&amp;/gi, '&');
+        const relative = decodedSource.startsWith('/');
+        const parsed = new URL(decodedSource, 'http://panino-internal.invalid');
+        if (!relative) {
+            const allowedOrigins = new Set([
+                process.env.INTERNAL_API_URL,
+                process.env.PUBLIC_API_BASE_URL,
+            ].filter(Boolean).map((value) => new URL(value).origin));
+            if (!allowedOrigins.has(parsed.origin)) return null;
+        }
+        const match = /^\/(?:api\/)?images\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i
+            .exec(parsed.pathname);
+        if (!match) return null;
+        const allowedParams = new Set(['space', 'token']);
+        if ([...parsed.searchParams.keys()].some((key) => !allowedParams.has(key))) return null;
+        const spaces = parsed.searchParams.getAll('space');
+        if (spaces.length > 1) return null;
+        return { imageId: match[1], spaceId: spaces[0] || null };
+    } catch {
+        return null;
+    }
+}
+
+function getInternalImageAsDataUri(source, userId) {
+    try {
+        const target = parseInternalImageSource(source);
+        if (!target) return null;
+        let dbKey = `user:${userId}`;
+        if (target.spaceId) {
+            const access = resolveSpaceAccess({ spaceId: target.spaceId, actorUserId: userId });
+            if (!access) return null;
+            dbKey = `space:${access.spaceId}`;
+        }
+        const db = getDb(dbKey);
+        const image = target.spaceId
+            ? db.prepare('SELECT mime_type, path FROM images WHERE id = ?').get(target.imageId)
+            : db.prepare('SELECT mime_type, path FROM images WHERE id = ? AND user_id = ?').get(target.imageId, userId);
 
         if (!image?.path) return null;
-
-        const absolutePath = path.join(UPLOADS_DIR, image.path);
-        if (!absolutePath.startsWith(UPLOADS_DIR) || !fs.existsSync(absolutePath)) return null;
+        const absolutePath = resolveStoredImagePath(dbKey, image.path);
+        if (!absolutePath || !fs.existsSync(absolutePath)) return null;
 
         const buffer = fs.readFileSync(absolutePath);
         return `data:${image.mime_type};base64,${buffer.toString('base64')}`;
@@ -285,16 +317,15 @@ async function embedImagesAsDataUri(html, userId) {
             return { original: fullMatch, replacement: fullMatch };
         }
 
-        const internalMatch = src.match(/\/(?:api\/)?images\/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})/i) ||
-            src.match(/\/(?:api\/)?images\/([a-f0-9-]{32,})/i);
+        const internalMatch = parseInternalImageSource(src);
         if (internalMatch) {
-            const dataUri = getInternalImageAsDataUri(internalMatch[1], userId);
+            const dataUri = getInternalImageAsDataUri(src, userId);
             if (dataUri) {
                 const sizeKB = Math.round(dataUri.length / 1024);
-                log(`  Image ${idx + 1}: Internal ${internalMatch[1]} converted (${sizeKB}KB)`);
+                log(`  Image ${idx + 1}: Internal ${internalMatch.imageId} converted (${sizeKB}KB)`);
                 return { original: fullMatch, replacement: `<img${beforeSrc} src="${dataUri}"${afterSrc}>` };
             }
-            log(`  Image ${idx + 1}: Internal lookup ${internalMatch[1]} failed - falling back to external/cleanup`);
+            log(`  Image ${idx + 1}: Internal lookup ${internalMatch.imageId} failed - falling back to external/cleanup`);
         }
 
         if (src.startsWith('http://') || src.startsWith('https://')) {
@@ -616,4 +647,3 @@ async function generatePdf(req, res) {
         }
     }
 }
-

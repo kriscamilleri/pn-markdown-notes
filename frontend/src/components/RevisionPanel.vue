@@ -28,7 +28,10 @@
           >
             <div class="text-xs text-gray-500">{{ formatTimestamp(item.createdAt) }}</div>
             <div class="text-sm font-medium text-gray-700 truncate">{{ item.title || '(Untitled)' }}</div>
-            <div class="text-[11px] uppercase tracking-wide text-gray-400">{{ item.type }}</div>
+            <div class="flex items-center gap-1 text-[11px] text-gray-400">
+              <span class="uppercase tracking-wide">{{ item.type }}</span>
+              <span v-if="item.actor" :data-testid="`revision-actor-${item.id}`">by {{ item.actor.name }}</span>
+            </div>
           </button>
 
           <button
@@ -60,21 +63,7 @@
         </div>
 
         <template v-else-if="revisionStore.selectedRevisionDetail">
-          <div v-if="showCompare" class="overflow-y-auto h-full min-h-0 font-mono text-xs leading-5">
-            <div
-              v-for="(line, i) in diffLineItems"
-              :key="i"
-              :class="{
-                'bg-red-50 text-red-700': line.type === 'removed',
-                'bg-green-50 text-green-700': line.type === 'added',
-                'text-gray-600': line.type === 'unchanged',
-              }"
-              class="flex px-2 whitespace-pre-wrap break-all"
-            >
-              <span class="select-none w-4 shrink-0 mr-2 text-gray-400">{{ line.prefix }}</span><span>{{ line.text }}</span>
-            </div>
-            <div v-if="diffLineItems.length === 0" class="p-3 text-gray-400 text-xs">No differences.</div>
-          </div>
+          <DiffView v-if="showCompare" :old-text="oldText" :new-text="newText" />
 
           <div v-else class="p-2 h-full">
             <textarea readonly class="pn-textarea h-full resize-none font-mono text-xs" :value="revisionStore.selectedRevisionDetail.content"></textarea>
@@ -91,7 +80,7 @@
 
 <script setup>
 import { computed, ref, watch } from 'vue';
-import { diffLines } from 'diff';
+import DiffView from '@/components/DiffView.vue';
 import { useRevisionStore } from '@/store/revisionStore';
 import { useDocStore } from '@/store/docStore';
 import { useUiStore } from '@/store/uiStore';
@@ -109,36 +98,19 @@ const ui = useUiStore();
 const showCompare = ref(true);
 
 const selectedFileId = computed(() => docStore.selectedFileId);
+const selectedDbKey = computed(() => docStore.selectedDbKey);
 const currentContent = computed(() => docStore.selectedFile?.content || '');
-
-const diffLineItems = computed(() => {
-  const oldText = revisionStore.selectedRevisionDetail?.content || '';
-  const newText = currentContent.value;
-  const hunks = diffLines(oldText, newText);
-  const result = [];
-  for (const hunk of hunks) {
-    const lines = hunk.value.replace(/\n$/, '').split('\n');
-    for (const line of lines) {
-      if (hunk.added) {
-        result.push({ type: 'added', prefix: '+', text: line });
-      } else if (hunk.removed) {
-        result.push({ type: 'removed', prefix: '-', text: line });
-      } else {
-        result.push({ type: 'unchanged', prefix: ' ', text: line });
-      }
-    }
-  }
-  return result;
-});
+const oldText = computed(() => revisionStore.selectedRevisionDetail?.content || '');
+const newText = computed(() => currentContent.value);
 
 watch(
-  () => selectedFileId.value,
-  async (noteId) => {
+  () => [selectedFileId.value, selectedDbKey.value],
+  async ([noteId, dbKey]) => {
     revisionStore.resetState();
     showCompare.value = true;
-    if (!noteId) return;
+    if (!noteId || !dbKey) return;
     try {
-      await revisionStore.fetchRevisions(noteId, { reset: true, limit: 50 });
+      await revisionStore.fetchRevisions(dbKey, noteId, { reset: true, limit: 50 });
     } catch {
       // error is surfaced via store state and inline UI
     }
@@ -156,7 +128,7 @@ function formatTimestamp(value) {
 async function refreshList() {
   if (!selectedFileId.value) return;
   try {
-    await revisionStore.fetchRevisions(selectedFileId.value, { reset: true, limit: 50 });
+    await revisionStore.fetchRevisions(selectedDbKey.value, selectedFileId.value, { reset: true, limit: 50 });
   } catch {
     // error is surfaced via store state and inline UI
   }
@@ -165,7 +137,7 @@ async function refreshList() {
 async function selectRevision(revisionId) {
   if (!selectedFileId.value || !revisionId) return;
   try {
-    await revisionStore.fetchRevisionDetail(selectedFileId.value, revisionId);
+    await revisionStore.fetchRevisionDetail(selectedDbKey.value, selectedFileId.value, revisionId);
   } catch {
     // error is surfaced via store state and inline UI
   }
@@ -174,7 +146,7 @@ async function selectRevision(revisionId) {
 async function loadMore() {
   if (!selectedFileId.value) return;
   try {
-    await revisionStore.loadMore(selectedFileId.value, 50);
+    await revisionStore.loadMore(selectedDbKey.value, selectedFileId.value, 50);
   } catch {
     // error is surfaced via store state and inline UI
   }
@@ -183,7 +155,7 @@ async function loadMore() {
 async function saveVersion() {
   if (!selectedFileId.value) return;
   try {
-    const result = await revisionStore.saveManualRevision(selectedFileId.value);
+    const result = await revisionStore.saveManualRevision(selectedDbKey.value, selectedFileId.value);
     if (result?.created === false && result?.reason === 'duplicate-latest') {
       ui.addToast('Latest version is identical; nothing new was saved.', 'info');
       return;
@@ -199,6 +171,7 @@ async function restoreSelected() {
 
   try {
     const result = await revisionStore.restoreRevision(
+      selectedDbKey.value,
       selectedFileId.value,
       revisionStore.selectedRevisionId
     );

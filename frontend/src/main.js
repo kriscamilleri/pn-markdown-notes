@@ -15,7 +15,7 @@ if ('serviceWorker' in navigator) {
     navigator.serviceWorker
       .register('/service-worker.js', { scope: '/' })
       .then((registration) => {
-        console.log('[PWA] Service Worker registered:', registration.scope);
+        console.info('[PWA] Service Worker registered:', registration.scope);
 
         // Check for updates periodically
         setInterval(() => {
@@ -28,7 +28,7 @@ if ('serviceWorker' in navigator) {
           if (!newWorker) return;
           newWorker.addEventListener('statechange', () => {
             if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
-              console.log('[PWA] New version available, updating...', APP_VERSION);
+              console.info('[PWA] New version available, updating...', APP_VERSION);
               const ui = useUiStore();
               ui.addToast('Updating to the latest version...', 'info', 5000);
               newWorker.postMessage({ type: 'SKIP_WAITING' });
@@ -43,7 +43,7 @@ if ('serviceWorker' in navigator) {
     // Listen for messages from service worker
     navigator.serviceWorker.addEventListener('message', (event) => {
       if (event.data && event.data.type === 'BACKGROUND_SYNC') {
-        console.log('[PWA] Background sync message received');
+        console.info('[PWA] Background sync message received');
         // Trigger sync if applicable
         import('@/store/syncStore').then(({ useSyncStore }) => {
           const syncStore = useSyncStore(pinia);

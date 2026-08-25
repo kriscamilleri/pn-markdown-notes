@@ -154,7 +154,7 @@ fi && \
 docker exec -i \
   -e PANINO_STREAM_BACKUP_RUN=1 \
   -e PANINO_BACKUP_LIST=1 \
-  -e DB_DIR=/app/data \
+  -e DB_DIR=/app/backend/api-service/data \
   \"\$container\" node --input-type=module -"
 
   "${ssh_command[@]}" "$SSH_USER@$SSH_HOST" "$list_command" < "$PRODUCER"
@@ -213,7 +213,8 @@ if [ -z \"\$container\" ]; then \
 fi && \
 docker exec -i \
   -e PANINO_STREAM_BACKUP_RUN=1 \
-  -e DB_DIR=/app/data \
+  -e DB_DIR=/app/backend/api-service/data \
+  -e UPLOADS_DIR=/app/backend/api-service/uploads \
   -e PANINO_BACKUP_TMP_DIR=/dev/shm \
   -e PANINO_BACKUP_PROGRESS=1$selection_env \
   \"\$container\" node --input-type=module -"
@@ -233,10 +234,16 @@ gzip -t -- "$partial_path" || {
 
 database_count="$(
   tar -tzf "$partial_path" |
-    awk '/^[^/]+\.db$/ { count += 1 } END { print count + 0 }'
+    awk '/^data\/(spaces\/)?[^/]+\.db$/ { count += 1 } END { print count + 0 }'
 )"
 [[ "$database_count" -gt 0 ]] || {
   echo "Received archive contains no database snapshots" >&2
+  exit 1
+}
+
+tar -tzf "$partial_path" |
+  awk '$0 == "panino-backup-manifest.json" { found = 1 } END { exit !found }' || {
+  echo "Received archive contains no production backup manifest" >&2
   exit 1
 }
 

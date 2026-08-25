@@ -1,0 +1,31 @@
+# Repository-root build context. The api-service and frontend images now build
+# from the repository root so the shared @panino/content-merge package is
+# available to both; this keeps every node_modules, database, upload and build
+# artifact out of the image layers.
+
+**/node_modules
+.git
+.gitignore
+.nvmrc
+.claude
+.vscode
+
+# Never ship user data into an image layer.
+backend/api-service/data/
+backend/api-service/uploads/
+
+# Local database and test artifacts.
+**/*.db
+**/*.db-wal
+**/*.db-shm
+coverage/
+
+# Generated frontend output.
+frontend/dist/
+
+# Editor/agent scratch and logs.
+*.log
+combined_content.txt
+selected_files.txt
+print_rendering_context.txt
+prompt.md

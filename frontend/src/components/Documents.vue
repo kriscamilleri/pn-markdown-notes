@@ -75,6 +75,24 @@
         </div>
 
         <div class="flex-1 overflow-y-auto">
+            <DocumentTransferPanel />
+            <div
+                v-if="docStore.syncStore.bootstrapState.status === 'loading'"
+                class="mb-2 rounded-md bg-blue-50 px-3 py-2 text-sm text-blue-800"
+                role="status"
+                data-testid="space-bootstrap-progress"
+            >
+                Loading shared space {{ docStore.syncStore.bootstrapState.completed + 1 }}
+                of {{ docStore.syncStore.bootstrapState.total }}…
+            </div>
+            <div
+                v-else-if="docStore.syncStore.bootstrapState.status === 'upgrade-required'"
+                class="mb-2 rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-800"
+                role="alert"
+                data-testid="space-bootstrap-upgrade-required"
+            >
+                {{ docStore.syncStore.bootstrapState.error }}
+            </div>
             <div
                 v-if="searchQuery"
                 data-testid="documents-tree-search"
@@ -83,7 +101,7 @@
                     <ul class="space-y-1">
                         <li
                             v-for="item in filteredStructure"
-                            :key="item.id"
+                            :key="item.treeKey || item.id"
                         >
                             <TreeItem
                                 :item="item"
@@ -108,7 +126,7 @@
                 <ul class="space-y-1">
                     <li
                         v-for="item in rootItems"
-                        :key="item.id"
+                        :key="item.treeKey || item.id"
                     >
                         <TreeItem
                             :item="item"
@@ -137,6 +155,7 @@
         <TemplatePickerModal
             v-if="showTemplatePicker"
             :current-folder-id="structureStore.selectedFolderId"
+            :database-key="structureStore.selectedDbKey || docStore.syncStore.personalDbKey"
             @close="showTemplatePicker = false"
             @created="onNoteCreatedFromTemplate"
         />
@@ -144,8 +163,7 @@
 </template>
 
 <script setup>
-import { ref, watch, nextTick, provide } from 'vue';
-import { storeToRefs } from 'pinia';
+import { computed, ref, watch, nextTick, provide } from 'vue';
 import { useRouter } from 'vue-router';
 import { useDocStore } from '@/store/docStore';
 import { useUiStore } from '@/store/uiStore';
@@ -155,15 +173,19 @@ import { Search, X, FilePlus, FolderPlus, FileText } from 'lucide-vue-next'
 import TemplatePickerModal from '@/components/TemplatePickerModal.vue'
 import PromptModal from '@/components/PromptModal.vue'
 import { useStructureStore } from '@/store/structureStore'
+import { useSpaceTransferStore } from '@/store/spaceTransferStore'
+import DocumentTransferPanel from '@/components/DocumentTransferPanel.vue'
 
 const docStore = useDocStore()
 const ui = useUiStore();
 const structureStore = useStructureStore()
+const transferStore = useSpaceTransferStore()
 const router = useRouter();
 
-const { rootItems } = storeToRefs(docStore)
+const rootItems = computed(() => docStore.rootItems)
 
 provide('refreshParent', docStore.loadRootItems);
+provide('requestDatabaseTransfer', (details) => transferStore.begin(details));
 
 /* search / ui refs */
 const searchQuery = ref('')
@@ -182,7 +204,7 @@ function matchesSearch(text, query) { return (text || '').toLowerCase().includes
 
 async function getAllFilesInFolder(f) {
     let res = [];
-    const children = await docStore.getChildren(f.id);
+    const children = await docStore.getChildren(f.id, f.dbKey);
     for (const c of children) {
         if (c.type === 'file') {
             res.push(c);
@@ -194,7 +216,7 @@ async function getAllFilesInFolder(f) {
 }
 
 async function getImmediateFiles(f) {
-    return (await docStore.getChildren(f.id)).filter(c => c.type === 'file')
+    return (await docStore.getChildren(f.id, f.dbKey)).filter(c => c.type === 'file')
 }
 
 const filteredStructure = ref([])
@@ -254,16 +276,16 @@ async function confirmCreate() {
     try {
         let newItem;
         if (createType.value === 'Document') {
-            newItem = await docStore.createFile(newItemName.value)
+            newItem = await docStore.createFile(docStore.syncStore.personalDbKey, newItemName.value)
             if (newItem && newItem.id) {
                 await nextTick() // Wait for DOM updates
-                router.push({ name: 'doc', params: { fileId: newItem.id } })
+                router.push({ name: 'doc', params: { fileId: newItem.id }, query: { dbKey: newItem.dbKey } })
             }
         } else {
-            newItem = await docStore.createFolder(newItemName.value)
+            newItem = await docStore.createFolder(docStore.syncStore.personalDbKey, newItemName.value)
             if (newItem && newItem.id) {
                 await nextTick()
-                router.push({ name: 'folder', params: { folderId: newItem.id } })
+                router.push({ name: 'folder', params: { folderId: newItem.id }, query: { dbKey: newItem.dbKey } })
             }
         }
     } catch (error) {
@@ -275,19 +297,32 @@ async function confirmCreate() {
 }
 function cancelCreate() { showCreateModal.value = false; newItemName.value = ''; createType.value = '' }
 
-function onNoteCreatedFromTemplate(noteId) {
+function onNoteCreatedFromTemplate(note) {
     showTemplatePicker.value = false;
-    router.push({ name: 'doc', params: { fileId: noteId } });
+    router.push({ name: 'doc', params: { fileId: note.id }, query: { dbKey: note.dbKey } });
 }
 
 /* misc */
-function handleDocumentsClick() { docStore.selectFolder(null) }
+function handleDocumentsClick() { docStore.selectFolder(null, docStore.syncStore.personalDbKey) }
 
 /* drag-and-drop root handler */
 async function handleRootDrop(e) {
     const droppedItem = JSON.parse(e.dataTransfer.getData('application/json'))
     if (!droppedItem || !droppedItem.id) return
-    await docStore.moveItem(droppedItem.id, null, droppedItem.type);
-    await docStore.loadRootItems(); // Refresh root list
+    try {
+        const result = await docStore.moveItem(
+            droppedItem.id,
+            null,
+            droppedItem.type,
+            docStore.syncStore.personalDbKey,
+        );
+        if (result?.requiresConfirmation) {
+            transferStore.begin(result);
+            return;
+        }
+        await docStore.loadRootItems(); // Refresh root list
+    } catch (error) {
+        ui.addToast(error?.message || 'Failed to move Document.', 'warning')
+    }
 }
 </script>

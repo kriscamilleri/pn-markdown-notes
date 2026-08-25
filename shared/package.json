@@ -1,0 +1,19 @@
+{
+    "name": "@panino/content-merge",
+    "version": "0.1.0",
+    "description": "Canonical normalization, hashing and three-way document-body merge for Panino.",
+    "type": "module",
+    "main": "contentMerge.js",
+    "exports": {
+        ".": "./contentMerge.js"
+    },
+    "scripts": {
+        "test": "vitest run"
+    },
+    "dependencies": {
+        "node-diff3": "3.2.1"
+    },
+    "devDependencies": {
+        "vitest": "^2.1.9"
+    }
+}

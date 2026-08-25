@@ -3,14 +3,18 @@ import request from 'supertest';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import { v4 as uuidv4 } from 'uuid';
 import { fileURLToPath } from 'url';
 import { createTestApp, setupTestUser, cleanupTestUser, getTestToken } from '../testHelpers.js';
-import { getUserDb } from '../../db.js';
-import { pruneOrphanImagesForUser, runDailyImageOrphanPrune, startImageOrphanPruneJob } from '../../image.js';
+import { deleteTestDb, getDb, getSpacesDb, getUserDb } from '../../db.js';
+import { pruneOrphanImagesForDb, pruneOrphanImagesForUser, runDailyImageOrphanPrune, startImageOrphanPruneJob } from '../../image.js';
+import { addEditorMember, createSpace } from '../../spaces.js';
+import { deleteSpaceUploads, resolveSpaceUploadRoot } from '../../spaceStorage.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const UPLOADS_DIR = path.join(__dirname, '../../uploads');
 const FIXTURES_DIR = path.join(__dirname, '../fixtures');
+const ORIGINAL_SHARED_SPACES_FLAG = process.env.SHARED_SPACES_ENABLED;
 
 const TEST_PNG_BUFFER = Buffer.from([
     0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D,
@@ -98,6 +102,7 @@ describe('Image management API', () => {
     let server;
     let user;
     let otherUser;
+    let spaceIds;
 
     beforeAll(() => {
         const result = createTestApp();
@@ -110,9 +115,18 @@ describe('Image management API', () => {
         const suffix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         user = await setupTestUser(`image-user-${suffix}@example.com`, 'password123');
         otherUser = await setupTestUser(`image-other-${suffix}@example.com`, 'password123');
+        spaceIds = [];
     });
 
     afterEach(() => {
+        const spacesDb = getSpacesDb();
+        for (const spaceId of spaceIds) {
+            spacesDb.prepare('DELETE FROM space_invites WHERE space_id = ?').run(spaceId);
+            spacesDb.prepare('DELETE FROM space_members WHERE space_id = ?').run(spaceId);
+            spacesDb.prepare('DELETE FROM spaces WHERE id = ?').run(spaceId);
+            deleteTestDb(`space:${spaceId}`);
+            deleteSpaceUploads(spaceId);
+        }
         if (user) {
             cleanupUploadedFiles(user.userId);
             cleanupTestUser(user.userId);
@@ -121,6 +135,8 @@ describe('Image management API', () => {
             cleanupUploadedFiles(otherUser.userId);
             cleanupTestUser(otherUser.userId);
         }
+        if (ORIGINAL_SHARED_SPACES_FLAG === undefined) delete process.env.SHARED_SPACES_ENABLED;
+        else process.env.SHARED_SPACES_ENABLED = ORIGINAL_SHARED_SPACES_FLAG;
     });
 
     afterAll(() => {
@@ -133,6 +149,21 @@ describe('Image management API', () => {
             }
         });
     });
+
+    function createTestSpace(owner = user, editor = otherUser) {
+        process.env.SHARED_SPACES_ENABLED = 'true';
+        const space = createSpace({ actorUserId: owner.userId, name: 'Image space' });
+        spaceIds.push(space.spaceId);
+        if (editor) {
+            addEditorMember({
+                actorUserId: owner.userId,
+                spaceId: space.spaceId,
+                userId: editor.userId,
+                role: 'editor',
+            });
+        }
+        return space;
+    }
 
     it('uploads allowlisted image types and captures size/sha metadata', async () => {
         const token = getTestToken(user.userId);
@@ -560,6 +591,23 @@ describe('Image management API', () => {
             .set('Authorization', `Bearer ${token}`)
             .send({ force: true });
         expect(deleteResponse.status).toBe(403);
+
+        insertImageRecord(user.userId, {
+            id: 'img-space-subtree',
+            filename: 'space-subtree.png',
+            mimeType: 'image/png',
+            path: 'spaces/22222222-2222-4222-8222-222222222222/private.png',
+            sizeBytes: 1,
+        });
+        await request(app)
+            .get('/images/img-space-subtree')
+            .set('Authorization', `Bearer ${token}`)
+            .expect(403);
+        await request(app)
+            .delete('/images/img-space-subtree')
+            .set('Authorization', `Bearer ${token}`)
+            .send({ force: true })
+            .expect(403);
     });
 
     it('prunes only unreferenced old images with bounded batch behavior', () => {
@@ -633,6 +681,168 @@ describe('Image management API', () => {
         const otherDb = getUserDb(otherUser.userId);
         expect(userDb.prepare('SELECT id FROM images WHERE id = ?').get('img-user-a-old-unused')).toBeUndefined();
         expect(otherDb.prepare('SELECT id FROM images WHERE id = ?').get('img-user-b-old-unused')).toBeUndefined();
+    });
+
+    it('uploads, lists, serves, reports usage, and deletes images through a qualified space target', async () => {
+        const space = createTestSpace();
+        const spaceId = space.spaceId;
+        const editorToken = getTestToken(otherUser.userId);
+        const ownerToken = getTestToken(user.userId);
+
+        const uploadResponse = await request(app)
+            .post(`/images?space=${spaceId}`)
+            .set('Authorization', `Bearer ${editorToken}`)
+            .attach('image', path.join(FIXTURES_DIR, 'test-image.png'));
+
+        expect(uploadResponse.status).toBe(201);
+        expect(uploadResponse.headers['cache-control']).toBe('private, no-store');
+        expect(uploadResponse.body.url).toBe(`/images/${uploadResponse.body.id}?space=${spaceId}`);
+
+        const db = getDb(`space:${spaceId}`);
+        const stored = db.prepare('SELECT * FROM images WHERE id = ?').get(uploadResponse.body.id);
+        expect(stored.user_id).toBe(otherUser.userId);
+        expect(fs.existsSync(path.join(resolveSpaceUploadRoot(spaceId), stored.path))).toBe(true);
+
+        db.prepare(`
+            INSERT INTO notes (id, user_id, folder_id, title, content, created_at, updated_at)
+            VALUES (?, ?, NULL, ?, ?, ?, ?)
+        `).run(
+            uuidv4(),
+            user.userId,
+            'Shared image Document',
+            `![shared](/images/${uploadResponse.body.id}?space=${spaceId})`,
+            new Date().toISOString(),
+            new Date().toISOString(),
+        );
+
+        const listResponse = await request(app)
+            .get(`/images?space=${spaceId}`)
+            .set('Authorization', `Bearer ${ownerToken}`)
+            .expect(200);
+        expect(listResponse.headers['cache-control']).toBe('private, no-store');
+        expect(listResponse.body.images).toEqual([
+            expect.objectContaining({
+                id: uploadResponse.body.id,
+                url: `/images/${uploadResponse.body.id}?space=${spaceId}`,
+                usageCount: 1,
+            }),
+        ]);
+
+        const statsResponse = await request(app)
+            .get(`/images/stats?space=${spaceId}`)
+            .set('Authorization', `Bearer ${ownerToken}`)
+            .expect(200);
+        expect(statsResponse.body).toMatchObject({
+            imageCount: 1,
+            totalImageBytes: TEST_PNG_BUFFER.length,
+            quotaBytes: 1024 * 1024 * 1024,
+        });
+
+        const usageResponse = await request(app)
+            .get(`/images/${uploadResponse.body.id}/usage?space=${spaceId}`)
+            .set('Authorization', `Bearer ${ownerToken}`)
+            .expect(200);
+        expect(usageResponse.body.usage.count).toBe(1);
+
+        const readResponse = await request(app)
+            .get(`/images/${uploadResponse.body.id}?space=${spaceId}&token=${encodeURIComponent(editorToken)}`)
+            .expect(200);
+        expect(readResponse.headers['cache-control']).toBe('private, no-store');
+        expect(readResponse.body).toEqual(TEST_PNG_BUFFER);
+
+        await request(app)
+            .delete(`/images/${uploadResponse.body.id}?space=${spaceId}`)
+            .set('Authorization', `Bearer ${editorToken}`)
+            .send({ force: true })
+            .expect(200);
+        expect(db.prepare('SELECT id FROM images WHERE id = ?').get(uploadResponse.body.id)).toBeUndefined();
+    });
+
+    it('returns the same non-disclosing 404 on every qualified image route for a non-member', async () => {
+        const space = createTestSpace();
+        const spaceId = space.spaceId;
+        const ownerToken = getTestToken(user.userId);
+        const outsiderToken = getTestToken(uuidv4());
+        const uploaded = await request(app)
+            .post(`/images?space=${spaceId}`)
+            .set('Authorization', `Bearer ${ownerToken}`)
+            .attach('image', path.join(FIXTURES_DIR, 'test-image.png'))
+            .expect(201);
+
+        const requests = [
+            request(app).get(`/images?space=${spaceId}`).set('Authorization', `Bearer ${outsiderToken}`),
+            request(app).get(`/images/stats?space=${spaceId}`).set('Authorization', `Bearer ${outsiderToken}`),
+            request(app).get(`/images/${uploaded.body.id}/usage?space=${spaceId}`).set('Authorization', `Bearer ${outsiderToken}`),
+            request(app).get(`/images/${uploaded.body.id}?space=${spaceId}&token=${encodeURIComponent(outsiderToken)}`),
+            request(app).post(`/images?space=${spaceId}`).set('Authorization', `Bearer ${outsiderToken}`).attach('image', path.join(FIXTURES_DIR, 'test-image.png')),
+            request(app).delete(`/images/${uploaded.body.id}?space=${spaceId}`).set('Authorization', `Bearer ${outsiderToken}`).send({ force: true }),
+            request(app).post(`/images/bulk-delete?space=${spaceId}`).set('Authorization', `Bearer ${outsiderToken}`).send({ ids: [uploaded.body.id], force: true }),
+        ];
+
+        for (const pendingRequest of requests) {
+            const response = await pendingRequest;
+            expect(response.status).toBe(404);
+            expect(response.body).toEqual({ error: 'Not found', code: 'SPACE_NOT_FOUND' });
+            expect(response.headers['cache-control']).toBe('private, no-store');
+        }
+    });
+
+    it('bulk-deletes and prunes only inside the qualified space upload root', async () => {
+        const space = createTestSpace();
+        const spaceId = space.spaceId;
+        const token = getTestToken(user.userId);
+        const first = await request(app)
+            .post(`/images?space=${spaceId}`)
+            .set('Authorization', `Bearer ${token}`)
+            .attach('image', path.join(FIXTURES_DIR, 'test-image.png'))
+            .expect(201);
+        const second = await request(app)
+            .post(`/images?space=${spaceId}`)
+            .set('Authorization', `Bearer ${token}`)
+            .attach('image', path.join(FIXTURES_DIR, 'test-image.png'))
+            .expect(201);
+
+        await request(app)
+            .post(`/images/bulk-delete?space=${spaceId}`)
+            .set('Authorization', `Bearer ${token}`)
+            .send({ ids: [first.body.id], force: false })
+            .expect(200, { results: [{ id: first.body.id, deleted: true }] });
+
+        const db = getDb(`space:${spaceId}`);
+        db.prepare('UPDATE images SET created_at = ? WHERE id = ?').run('2026-01-01T00:00:00.000Z', second.body.id);
+        expect(pruneOrphanImagesForDb(`space:${spaceId}`, { maxDeletes: 1, olderThanDays: 7 })).toBe(1);
+        expect(db.prepare('SELECT id FROM images WHERE id = ?').get(second.body.id)).toBeUndefined();
+    });
+
+    it('enforces the shared-space image quota before recording an upload', async () => {
+        const space = createTestSpace();
+        const spaceId = space.spaceId;
+        const db = getDb(`space:${spaceId}`);
+        db.prepare(`
+            INSERT INTO images (id, user_id, filename, mime_type, path, size_bytes, sha256, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+            uuidv4(),
+            user.userId,
+            'quota-reservation.png',
+            'image/png',
+            'quota-reservation.png',
+            1024 * 1024 * 1024,
+            '',
+            new Date().toISOString(),
+        );
+
+        const response = await request(app)
+            .post(`/images?space=${spaceId}`)
+            .set('Authorization', `Bearer ${getTestToken(user.userId)}`)
+            .attach('image', path.join(FIXTURES_DIR, 'test-image.png'));
+
+        expect(response.status).toBe(413);
+        expect(response.body).toEqual({
+            error: 'Image storage quota exceeded',
+            code: 'IMAGE_QUOTA_EXCEEDED',
+        });
+        expect(db.prepare('SELECT COUNT(*) AS count FROM images').get().count).toBe(1);
     });
 
     it('starts prune scheduler when enabled and runs on interval tick', () => {

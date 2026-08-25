@@ -2,13 +2,14 @@
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 import { createApp } from '../index.js';
+import { v4 as uuidv4 } from 'uuid';
 import { getAuthDb, deleteTestDb } from '../db.js';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'super-secret-for-dev';
 
 export function createTestApp() {
-    const { app, server, wss, clients } = createApp();
-    return { app, server, wss, clients };
+    const { app, server, wss, clients, collabManager } = createApp();
+    return { app, server, wss, clients, collabManager };
 }
 
 export function getTestToken(userId) {
@@ -17,7 +18,7 @@ export function getTestToken(userId) {
 
 export async function setupTestUser(email, password) {
     const db = getAuthDb();
-    const userId = `test-user-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    const userId = uuidv4();
     const hash = bcrypt.hashSync(password, 10);
 
     db.prepare(`

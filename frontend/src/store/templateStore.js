@@ -11,12 +11,14 @@ export const useTemplateStore = defineStore("templateStore", () => {
   const templates = ref([]);
   const isLoading = ref(false);
   const error = ref("");
+  const activeDbKey = ref(null);
 
-  async function loadTemplates() {
+  async function loadTemplates(dbKey) {
+    if (!dbKey) throw new Error("Database scope is required to load templates.");
     isLoading.value = true;
     error.value = "";
     try {
-      const rows = await syncStore.execute(
+      const rows = await syncStore.repository(dbKey).execute(
         "SELECT id, name, content, title_pattern, default_folder_id, created_at, updated_at FROM templates ORDER BY updated_at DESC",
       );
       templates.value = rows.map((r) => ({
@@ -28,6 +30,7 @@ export const useTemplateStore = defineStore("templateStore", () => {
         createdAt: r.created_at,
         updatedAt: r.updated_at,
       }));
+      activeDbKey.value = dbKey;
     } catch (err) {
       error.value = err.message;
     } finally {
@@ -36,6 +39,7 @@ export const useTemplateStore = defineStore("templateStore", () => {
   }
 
   async function createTemplate(
+    dbKey,
     name,
     content,
     titlePattern = "",
@@ -44,7 +48,7 @@ export const useTemplateStore = defineStore("templateStore", () => {
     const id = uuidv4();
     const now = new Date().toISOString();
     try {
-      await syncStore.execute(
+      await syncStore.repository(dbKey).transaction((repo) => repo.exec(
         "INSERT INTO templates (id, name, content, title_pattern, default_folder_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
         [
           id,
@@ -55,8 +59,8 @@ export const useTemplateStore = defineStore("templateStore", () => {
           now,
           now,
         ],
-      );
-      await loadTemplates();
+      ));
+      await loadTemplates(dbKey);
       uiStore.addToast("Template created.", "success");
       return id;
     } catch (err) {
@@ -66,6 +70,7 @@ export const useTemplateStore = defineStore("templateStore", () => {
   }
 
   async function updateTemplate(
+    dbKey,
     id,
     name,
     content,
@@ -74,11 +79,11 @@ export const useTemplateStore = defineStore("templateStore", () => {
   ) {
     const now = new Date().toISOString();
     try {
-      await syncStore.execute(
+      await syncStore.repository(dbKey).transaction((repo) => repo.exec(
         "UPDATE templates SET name = ?, content = ?, title_pattern = ?, default_folder_id = ?, updated_at = ? WHERE id = ?",
         [name, content, titlePattern || "", defaultFolderId || null, now, id],
-      );
-      await loadTemplates();
+      ));
+      await loadTemplates(dbKey);
       uiStore.addToast("Template updated.", "success");
     } catch (err) {
       uiStore.addToast("Failed to update template.", "error");
@@ -86,8 +91,8 @@ export const useTemplateStore = defineStore("templateStore", () => {
     }
   }
 
-  async function duplicateTemplate(id) {
-    const original = await syncStore.execute(
+  async function duplicateTemplate(dbKey, id) {
+    const original = await syncStore.repository(dbKey).execute(
       "SELECT name, content, title_pattern, default_folder_id FROM templates WHERE id = ?",
       [id],
     );
@@ -99,7 +104,7 @@ export const useTemplateStore = defineStore("templateStore", () => {
     const now = new Date().toISOString();
     const newName = `${orig.name} - Copy`;
     try {
-      await syncStore.execute(
+      await syncStore.repository(dbKey).transaction((repo) => repo.exec(
         "INSERT INTO templates (id, name, content, title_pattern, default_folder_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
         [
           newId,
@@ -110,8 +115,8 @@ export const useTemplateStore = defineStore("templateStore", () => {
           now,
           now,
         ],
-      );
-      await loadTemplates();
+      ));
+      await loadTemplates(dbKey);
       uiStore.addToast("Template duplicated.", "success");
       return newId;
     } catch (err) {
@@ -120,10 +125,10 @@ export const useTemplateStore = defineStore("templateStore", () => {
     }
   }
 
-  async function deleteTemplate(id) {
+  async function deleteTemplate(dbKey, id) {
     try {
-      await syncStore.execute("DELETE FROM templates WHERE id = ?", [id]);
-      await loadTemplates();
+      await syncStore.repository(dbKey).transaction((repo) => repo.exec("DELETE FROM templates WHERE id = ?", [id]));
+      await loadTemplates(dbKey);
       uiStore.addToast("Template deleted.", "success");
     } catch (err) {
       uiStore.addToast("Failed to delete template.", "error");
@@ -135,6 +140,7 @@ export const useTemplateStore = defineStore("templateStore", () => {
     templates,
     isLoading,
     error,
+    activeDbKey,
     loadTemplates,
     createTemplate,
     updateTemplate,

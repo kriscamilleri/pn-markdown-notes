@@ -25,23 +25,12 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue';
+import { storeToRefs } from 'pinia';
+import { useSyncStore } from '@/store/syncStore';
 
-const isOnline = ref(navigator.onLine);
-
-function updateOnlineStatus() {
-  isOnline.value = navigator.onLine;
-}
-
-onMounted(() => {
-  window.addEventListener('online', updateOnlineStatus);
-  window.addEventListener('offline', updateOnlineStatus);
-});
-
-onUnmounted(() => {
-  window.removeEventListener('online', updateOnlineStatus);
-  window.removeEventListener('offline', updateOnlineStatus);
-});
+// One connection source of truth for the offline banner, sync, and live
+// sessions. syncStore owns the browser online/offline listeners.
+const { isOnline } = storeToRefs(useSyncStore());
 </script>
 
 <style scoped>

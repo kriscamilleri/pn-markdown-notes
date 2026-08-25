@@ -33,4 +33,3 @@ export function firstPick(data) {
 export function pick(data) {
     return data.map((d) => d[Object.keys(d)[0]]);
 }
-//# sourceMappingURL=xplat-api.js.map

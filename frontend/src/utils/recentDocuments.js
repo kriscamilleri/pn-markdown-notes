@@ -87,6 +87,9 @@ export function normalizeRecentDocument(row = {}) {
         excerpt: extractExcerpt(row.content),
         wordCount: countWords(row.content),
         isPinned: normalizePinned(row.pinned),
+        dbKey: row.dbKey,
+        spaceName: row.spaceName || null,
+        visibility: row.spaceName ? `Shared in ${row.spaceName}` : 'Private',
     };
 }
 

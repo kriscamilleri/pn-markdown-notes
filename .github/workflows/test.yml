@@ -23,12 +23,19 @@ concurrency:
   group: tests-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+env:
+  # actions/checkout initializes a fresh repository before it fetches. Explicitly setting
+  # the repository's default branch avoids Git's global default-branch advisory.
+  GIT_CONFIG_COUNT: 1
+  GIT_CONFIG_KEY_0: init.defaultBranch
+  GIT_CONFIG_VALUE_0: main
+
 jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           node-version-file: ".nvmrc"
           cache: npm
@@ -40,11 +47,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           node-version-file: ".nvmrc"
           cache: npm
-          cache-dependency-path: frontend/package-lock.json
+          cache-dependency-path: |
+            shared/package-lock.json
+            frontend/package-lock.json
+      # The frontend file: link resolves bare imports from the shared package
+      # directory. Match the Docker build order so its runtime dependency is
+      # present in a clean checkout before Vitest loads contentMerge.js.
+      - run: npm ci --omit=dev
+        working-directory: shared
       - run: npm ci
         working-directory: frontend
       - run: npm test

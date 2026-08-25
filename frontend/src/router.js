@@ -13,6 +13,8 @@ import ImageManagerPage from "@/pages/ImageManagerPage.vue";
 import TemplateManagerPage from "@/pages/TemplateManagerPage.vue";
 import { pinia } from "./pinia";
 import RevisionHistoryPage from "@/pages/RevisionHistoryPage.vue";
+import SpacesPage from "@/pages/SpacesPage.vue";
+import AcceptSpaceInvitePage from "@/pages/AcceptSpaceInvitePage.vue";
 
 export const router = createRouter({
   history: createWebHashHistory(),
@@ -75,6 +77,16 @@ export const router = createRouter({
       component: SettingsPage,
     },
     {
+      path: "/spaces",
+      name: "spaces",
+      component: SpacesPage,
+    },
+    {
+      path: "/spaces/invitations/:token?",
+      name: "space-invitation",
+      component: AcceptSpaceInvitePage,
+    },
+    {
       path: "/images",
       name: "images",
       component: ImageManagerPage,
@@ -129,11 +141,15 @@ router.beforeEach(async (to, from, next) => {
       "reset-password",
     ].includes(to.name)
   ) {
-    return next({ name: "login" });
+    return next({ name: "login", query: { redirect: to.fullPath } });
   }
 
   // If authenticated but local DB not initialized, go to loading
-  if (authStore.isAuthenticated && !syncStore.isInitialized) {
+  if (
+    authStore.isAuthenticated &&
+    !syncStore.isInitialized &&
+    to.name !== "space-invitation"
+  ) {
     if (to.name !== "loading") {
       return next({
         name: "loading",

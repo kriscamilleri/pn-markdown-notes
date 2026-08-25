@@ -59,4 +59,3 @@ export function serializeTx(cb, mutex, db) {
         return cb(tx);
     });
 }
-//# sourceMappingURL=serialize.js.map

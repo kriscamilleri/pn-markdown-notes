@@ -1,16 +1,105 @@
 // backend/api-service/sync.js
 import express from "express";
-import { getUserDb, invalidateUserDb } from "./db.js";
+import { getDb, invalidateDb } from "./db.js";
 import { triggerDailyAutoBackup } from "./backup.js";
 import {
   createRevisionSnapshot,
   deleteNoteRevisionsForDeletedNote,
 } from "./revision.js";
+import { resolveSpaceAccess, getSpaceMembershipVersion } from "./spaces.js";
+import { closeCollabDocumentSessions, pokePersonalClients, pokeSpaceSubscribers } from "./websocket.js";
 
 const router = express.Router();
 
 const ACCEPTED_TYPES = ["number", "string", "bigint"]; // plus Buffer & null
 const SITE_ID_LEN = 16;
+
+// COLLAB-04 §4.2: the exact set of tables/columns a shared-space sync may
+// touch. Anything else — `users`, `images`, `settings`, unknown tables,
+// `user_id`, or any future column — is rejected with the whole batch intact
+// (no partial merge) until this allowlist is deliberately extended with
+// schema tests. `-1` (and any other tombstone-cid spelling) is allowed for
+// every listed table since crsqlite tombstones carry no column name.
+const SPACE_CHANGE_ALLOWLIST = {
+  folders: new Set(["id", "name", "parent_id", "created_at"]),
+  notes: new Set([
+    "id",
+    "folder_id",
+    "title",
+    "content",
+    "pinned",
+    "created_at",
+    "updated_at",
+  ]),
+  globals: new Set([
+    "key",
+    "id",
+    "value",
+    "created_at",
+    "updated_at",
+    "display_key",
+  ]),
+  templates: new Set([
+    "id",
+    "name",
+    "content",
+    "title_pattern",
+    "default_folder_id",
+    "created_at",
+    "updated_at",
+  ]),
+};
+
+function isTombstoneCid(cid) {
+  return cid == null || cid === "" || String(cid) === "-1";
+}
+
+/**
+ * Logs a shared-space metadata operational failure (never the underlying
+ * message/stack, which could contain internal detail) and formats a safe,
+ * non-disclosing 500 for the HTTP caller. Used whenever `resolveSpaceAccess`
+ * / `getSpaceMembershipVersion` throw — a genuine metadata failure must
+ * surface as a server error, never be silently treated as "not found" or
+ * "no version yet".
+ */
+function respondToSpaceMetadataError(res, event, error) {
+  console.error("[sync]", JSON.stringify({
+    event,
+    category: error?.code || "space_metadata_error",
+  }));
+  return res.status(500).json({ error: "Internal server error" });
+}
+
+/**
+ * True only when `pk` decodes (via the same `parsePkId` logic used to drive
+ * merge-time note-revision extraction) to a non-empty string id. `folders`,
+ * `notes`, `globals`, and `templates` all use a single TEXT PRIMARY KEY
+ * column, so every allowlisted change — including a delete tombstone, which
+ * still carries the pk of the row being deleted — must resolve to one. A
+ * missing, empty, or otherwise malformed pk is never permitted for a
+ * shared-space change.
+ */
+function hasValidSpaceChangePk(change) {
+  const id = parsePkId(change?.pk);
+  return typeof id === "string" && id.length > 0;
+}
+
+/**
+ * Validates one shared-space change batch against the COLLAB-04 §4.2
+ * allowlist. Pure/read-only — callers must reject the entire batch (no
+ * partial merge) when this returns `false`.
+ */
+export function validateSpaceChangeBatch(changes) {
+  for (const change of changes) {
+    if (!change || typeof change !== "object") return false;
+    const allowedCids = SPACE_CHANGE_ALLOWLIST[change.table];
+    if (!allowedCids) return false;
+    if (!hasValidSpaceChangePk(change)) return false;
+    if (isTombstoneCid(change.cid)) continue;
+    if (!allowedCids.has(String(change.cid))) return false;
+  }
+  return true;
+}
 
 /* ------------------------------------------------------------------ *
  * Helpers
@@ -188,16 +277,52 @@ router.post("/sync", (req, res, next) => {
   const since = Number(req.body?.since ?? 0);
   const siteId = req.body?.siteId ?? null;
   const changes = Array.isArray(req.body?.changes) ? req.body.changes : [];
+  const requestedSpaceId = req.body?.space ?? null;
+
+  // Absent `space` keeps the exact pre-Phase-2 personal-sync behavior and
+  // wire shape. Present `space` is gated by the feature flag and active
+  // membership (never a client-supplied user id) before the space content
+  // database is ever opened; unknown space, disabled flag, and non-member
+  // are all indistinguishable 404s (COLLAB-04 §4.2).
+  let isSpaceSync = false;
+  let spaceAccess;
+  let dbKey = `user:${userId}`;
+
+  if (requestedSpaceId != null) {
+    try {
+      spaceAccess = resolveSpaceAccess(requestedSpaceId, userId);
+    } catch (error) {
+      return respondToSpaceMetadataError(res, "sync_space_access_error", error);
+    }
+    if (!spaceAccess) {
+      return res.status(404).json({ error: "Not found", code: "SPACE_NOT_FOUND" });
+    }
+    isSpaceSync = true;
+    dbKey = `space:${spaceAccess.spaceId}`;
+  }
 
   if (changes.length > 0) {
     console.log(
-      `SERVER: Received ${changes.length} changes for user ${userId}`,
+      isSpaceSync
+        ? `SERVER: Received ${changes.length} changes for a shared space sync`
+        : `SERVER: Received ${changes.length} changes for user ${userId}`,
     );
+  }
+
+  // Validate the entire batch against the shared-space allowlist before the
+  // space content database is even opened, and before any merge is
+  // attempted: an invalid batch is rejected in full, never partially
+  // merged.
+  if (isSpaceSync && changes.length && !validateSpaceChangeBatch(changes)) {
+    return res.status(400).json({
+      error: "Change batch contains a table/column not permitted for shared spaces",
+      code: "SPACE_CHANGE_NOT_ALLOWED",
+    });
   }
 
   let db;
   try {
-    db = getUserDb(userId);
+    db = getDb(dbKey);
   } catch (e) {
     return next(e);
   }
@@ -287,29 +412,30 @@ router.post("/sync", (req, res, next) => {
             skipDuplicateCheck: false,
             enforceAutoThrottle: true,
             runPruneGate: true,
+            // Only a space sync attributes revisions to the server-derived
+            // JWT actor; personal syncs keep the pre-Phase-2 behavior of no
+            // actor attribution. A client can never supply these fields.
+            ...(isSpaceSync ? { actorUserId: userId, actorKind: "sync" } : {}),
           });
         }
       });
       applyChanges(changes, noteMutations);
 
-      // ✅ FIX: Notify other clients, excluding the one that sent the changes.
+      // Notify other clients, excluding the one that sent the changes.
+      // Personal sync keeps the exact legacy `{type:'sync'}` poke; a space
+      // sync uses the v1 envelope and only reaches sockets currently
+      // authorized (re-checked at poke time) and subscribed to this dbKey.
       const { clients } = req;
-      const requestorSiteId = siteId; // The siteId from the POST body is the sender's ID
-
-      clients.forEach((clientInfo, clientWs) => {
-        // clientInfo is now an object: { userId, siteId }
-        // Poke all clients for the same user EXCEPT the one who sent the changes.
-        if (
-          clientInfo.userId === userId &&
-          clientInfo.siteId !== requestorSiteId
-        ) {
-          if (clientWs.readyState === 1) {
-            // WebSocket.OPEN
-            console.log(`Poking client with siteId: ${clientInfo.siteId}`);
-            clientWs.send(JSON.stringify({ type: "sync" }));
-          }
-        }
-      });
+      if (isSpaceSync) {
+        closeCollabDocumentSessions(
+          clients,
+          dbKey,
+          noteMutations.filter((mutation) => mutation.deleted).map((mutation) => mutation.noteId),
+        );
+        pokeSpaceSubscribers(clients, dbKey, siteId);
+      } else {
+        pokePersonalClients(clients, userId, siteId);
+      }
     }
 
     const mySiteBlob = toSiteIdBlob(siteId);
@@ -331,20 +457,43 @@ router.post("/sync", (req, res, next) => {
       .get();
     const newClock = clockRow.version ?? since;
 
-    res.json({
+    const responseBody = {
       changes: remote,
       clock: newClock,
       skipped: 0,
-    });
-    void triggerDailyAutoBackup(userId);
+    };
+    if (isSpaceSync) {
+      // Computed after the merge and remote-changes query so a metadata
+      // failure here is never conflated with (and never treated as) a
+      // crsqlite merge failure — the data already persisted; only the
+      // enrichment membershipVersion field failed to compute.
+      let currentMembershipVersion;
+      try {
+        currentMembershipVersion = getSpaceMembershipVersion(userId);
+      } catch (error) {
+        return respondToSpaceMetadataError(res, "sync_membership_version_error", error);
+      }
+      responseBody.membershipVersion = currentMembershipVersion;
+    }
+    res.json(responseBody);
+
+    // A shared space has no personal GitHub auto backup target (Phase 6
+    // will add a dedicated space backup producer); never trigger the
+    // per-user backup job for a space sync.
+    if (!isSpaceSync) {
+      void triggerDailyAutoBackup(userId);
+    }
   } catch (err) {
     if (mergeAttempted) {
       const failedChange = mergeChange;
       const pk = failedChange?.pk;
-      const invalidated = invalidateUserDb(userId, db, "crsqlite-merge-failure");
+      // Invalidate exactly the targeted connection (personal or space); the
+      // canonical dbKey form means this never touches an unrelated database.
+      const invalidated = invalidateDb(dbKey, db, "crsqlite-merge-failure");
+      const [dbKeyKind, dbKeyId] = dbKey.split(":");
       console.error("[sync]", JSON.stringify({
         event: "sync_crsqlite_merge_failure",
-        userId: String(userId).slice(0, 2) + "…" + String(userId).slice(-2),
+        dbKey: `${dbKeyKind}:${dbKeyId.slice(0, 2)}…${dbKeyId.slice(-2)}`,
         table: failedChange?.table || "unknown",
         pk: typeof pk === "string" ? pk.slice(0, 80) : "unavailable",
         category: err?.code || "crsqlite-merge-error",

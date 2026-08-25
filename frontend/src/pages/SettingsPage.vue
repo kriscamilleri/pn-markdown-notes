@@ -46,6 +46,16 @@
                     <FileText class="w-4 h-4" />
                     <span>Manage Templates</span>
                 </BaseButton>
+                <BaseButton
+                    v-if="syncStore.sharedSpacesAvailable"
+                    variant="secondary"
+                    size="md"
+                    @click="goToSpaces"
+                    data-testid="settings-spaces-button"
+                >
+                    <Users class="w-4 h-4" />
+                    <span>Manage Spaces</span>
+                </BaseButton>
             </div>
         </div>
     </AccountLayout>
@@ -56,12 +66,14 @@ import { ref, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { storeToRefs } from 'pinia';
 import { useAuthStore } from '@/store/authStore';
+import { useSyncStore } from '@/store/syncStore';
 import AccountLayout from '@/components/AccountLayout.vue';
 import ChangePasswordForm from '@/components/ChangePasswordForm.vue';
 import BaseButton from '@/components/BaseButton.vue';
-import { Image, FileText } from 'lucide-vue-next';
+import { Image, FileText, Users } from 'lucide-vue-next';
 
 const authStore = useAuthStore();
+const syncStore = useSyncStore();
 const router = useRouter();
 const { user } = storeToRefs(authStore);
 const loadingProfile = ref(true);
@@ -72,6 +84,10 @@ function goToImages() {
 
 function goToTemplates() {
     router.push('/templates');
+}
+
+function goToSpaces() {
+    router.push('/spaces');
 }
 
 function formatBytes(value) {

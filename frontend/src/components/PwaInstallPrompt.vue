@@ -72,7 +72,7 @@ async function handleInstall() {
   // Wait for the user to respond to the prompt
   const { outcome } = await deferredPrompt.value.userChoice;
 
-  console.log(`User response to the install prompt: ${outcome}`);
+  console.info(`User response to the install prompt: ${outcome}`);
 
   // Clear the deferredPrompt
   deferredPrompt.value = null;
@@ -89,7 +89,7 @@ function dismissPrompt() {
 onMounted(() => {
   // Check if already installed
   if (window.matchMedia('(display-mode: standalone)').matches) {
-    console.log('[PWA] App is already installed');
+    console.info('[PWA] App is already installed');
     return;
   }
 

@@ -6,11 +6,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 IMAGE=panino-api-test
-docker build -q -f backend/api-service/Dockerfile.test -t "$IMAGE" backend/api-service
+docker build -q -f backend/api-service/Dockerfile.test -t "$IMAGE" .
 
-# The image's build context is backend/api-service, so repo-level scripts/ is not baked in.
-# tests/unit/stream-database-backup.test.js imports the producer by a path relative to the
-# repo root (../../../../scripts/...). Inside the container WORKDIR is /app, so that path
-# resolves to /scripts — mount it read-only there so the import means the same thing in the
-# container as it does on the host. Keeps the build context narrow (DX-01 Phase 1).
-docker run --rm -v "$PWD/scripts:/scripts:ro" "$IMAGE" npm test -- "$@"
+# tests/unit/stream-database-backup.test.js imports the producer relative to the
+# repository root. The image preserves the backend's repository-relative path,
+# so mount root scripts at the matching /app/scripts location.
+docker run --rm -v "$PWD/scripts:/app/scripts:ro" "$IMAGE" npm test -- "$@"

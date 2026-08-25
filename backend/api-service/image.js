@@ -5,19 +5,26 @@ import { v4 as uuidv4 } from 'uuid';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
-import { fileURLToPath } from 'url';
-import { getHealthyUserDb, getUserDb, listUserDbIds } from './db.js';
+import { getDb, getHealthyDb, listUserDbIds } from './db.js';
+import { resolveSpaceAccess } from './spaces.js';
+import {
+    resolveDatabaseUploadRoot,
+    resolveStoredImagePath,
+    toCanonicalImageUrl,
+} from './spaceStorage.js';
 
 export const imageRoutes = express.Router();
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const UPLOADS_DIR = path.join(__dirname, 'uploads');
 const MAX_IMAGE_SIZE_BYTES = 1 * 1024 * 1024;
 const IMAGE_PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const IMAGE_PRUNE_BATCH_SIZE = 100;
 const IMAGE_PRUNE_MIN_AGE_DAYS = 7;
 const QUOTA_BYTES_ENV = Number(process.env.IMAGE_QUOTA_BYTES);
 const QUOTA_BYTES = Number.isFinite(QUOTA_BYTES_ENV) && QUOTA_BYTES_ENV > 0 ? QUOTA_BYTES_ENV : null;
+const SPACE_QUOTA_BYTES_ENV = Number(process.env.SPACE_IMAGE_QUOTA_BYTES);
+const SPACE_QUOTA_BYTES = Number.isFinite(SPACE_QUOTA_BYTES_ENV) && SPACE_QUOTA_BYTES_ENV > 0
+    ? SPACE_QUOTA_BYTES_ENV
+    : 1024 * 1024 * 1024;
 
 const ALLOWED_MIME_TO_EXTENSIONS = new Map([
     ['image/png', ['.png']],
@@ -26,10 +33,6 @@ const ALLOWED_MIME_TO_EXTENSIONS = new Map([
     ['image/webp', ['.webp']],
     ['image/svg+xml', ['.svg']],
 ]);
-
-if (!fs.existsSync(UPLOADS_DIR)) {
-    fs.mkdirSync(UPLOADS_DIR, { recursive: true });
-}
 
 function normalizeExt(filename) {
     const ext = path.extname(filename || '').toLowerCase();
@@ -65,10 +68,6 @@ function normalizeOriginalFilename(filename) {
     }
 }
 
-function toImageUrl(imageId) {
-    return `/images/${imageId}`;
-}
-
 function escapeLike(value) {
     return String(value).replace(/[!%_]/g, '!$&');
 }
@@ -78,13 +77,59 @@ function getImageReferencePatterns(imageId) {
     return [`%/images/${escapedId}%`, `%/api/images/${escapedId}%`];
 }
 
-function resolveUploadPath(relativePath) {
-    const absolutePath = path.resolve(UPLOADS_DIR, relativePath || '');
-    const uploadsRoot = `${UPLOADS_DIR}${path.sep}`;
-    if (absolutePath !== UPLOADS_DIR && !absolutePath.startsWith(uploadsRoot)) {
-        return null;
+function resolveImageTarget(req, res, operation, { healthy = false } = {}) {
+    const userId = req.user.user_id;
+    const rawSpaceId = req.query.space;
+    if (rawSpaceId === undefined) {
+        const dbKey = `user:${userId}`;
+        return {
+            dbKey,
+            db: healthy ? getHealthyDb(dbKey, operation) : getDb(dbKey),
+            isSpace: false,
+            quotaBytes: QUOTA_BYTES,
+            userId,
+        };
     }
-    return absolutePath;
+
+    // Even rejected qualified requests must not be stored by an intermediary.
+    res.set('Cache-Control', 'private, no-store');
+    if (typeof rawSpaceId !== 'string') return null;
+    const access = resolveSpaceAccess({ spaceId: rawSpaceId, actorUserId: userId });
+    if (!access) return null;
+    const dbKey = `space:${access.spaceId}`;
+    return {
+        dbKey,
+        db: healthy ? getHealthyDb(dbKey, operation) : getDb(dbKey),
+        isSpace: true,
+        quotaBytes: SPACE_QUOTA_BYTES,
+        userId,
+    };
+}
+
+function imageScopeClause(target) {
+    return target.isSpace ? { sql: '', params: [] } : { sql: ' AND user_id = ?', params: [target.userId] };
+}
+
+function findImage(target, imageId, columns = 'id') {
+    const scope = imageScopeClause(target);
+    return target.db.prepare(`SELECT ${columns} FROM images WHERE id = ?${scope.sql}`).get(imageId, ...scope.params);
+}
+
+function imageStats(target) {
+    const scope = imageScopeClause(target);
+    return target.db.prepare(`
+        SELECT COUNT(*) as image_count, COALESCE(SUM(size_bytes), 0) as total_image_bytes
+        FROM images
+        WHERE 1 = 1${scope.sql}
+    `).get(...scope.params);
+}
+
+function respondImageTargetError(res, error, event) {
+    console.error('[images]', JSON.stringify({
+        event,
+        category: error?.code || 'image_target_error',
+    }));
+    return res.status(500).json({ error: 'Internal server error' });
 }
 
 function getImageUsage(db, imageId) {
@@ -154,9 +199,10 @@ function parseSort(rawSort) {
     return 'created_desc';
 }
 
-function buildListQuery({ search, sort, cursor, limit }) {
-    const whereClauses = ['user_id = ?'];
-    const params = [];
+function buildListQuery({ target, search, sort, cursor, limit }) {
+    const scope = imageScopeClause(target);
+    const whereClauses = [target.isSpace ? '1 = 1' : 'user_id = ?'];
+    const params = [...scope.params];
     const orderByMap = {
         created_desc: 'created_at DESC, id DESC',
         created_asc: 'created_at ASC, id ASC',
@@ -199,23 +245,20 @@ function buildListQuery({ search, sort, cursor, limit }) {
     };
 }
 
-function deleteImageRecordAndFile({ db, userId, imageId }) {
-    const image = db.prepare(`
-        SELECT id, path
-        FROM images
-        WHERE id = ? AND user_id = ?
-    `).get(imageId, userId);
+function deleteImageRecordAndFile({ target, imageId }) {
+    const image = findImage(target, imageId, 'id, path');
 
     if (!image) {
         return { deleted: false, reason: 'not-found' };
     }
 
-    const absolutePath = resolveUploadPath(image.path);
+    const absolutePath = resolveStoredImagePath(target.dbKey, image.path);
     if (!absolutePath) {
         return { deleted: false, reason: 'forbidden' };
     }
 
-    db.prepare('DELETE FROM images WHERE id = ? AND user_id = ?').run(imageId, userId);
+    const scope = imageScopeClause(target);
+    target.db.prepare(`DELETE FROM images WHERE id = ?${scope.sql}`).run(imageId, ...scope.params);
 
     try {
         if (fs.existsSync(absolutePath)) {
@@ -230,7 +273,13 @@ function deleteImageRecordAndFile({ db, userId, imageId }) {
 
 const storage = multer.diskStorage({
     destination: function (req, file, cb) {
-        cb(null, UPLOADS_DIR);
+        try {
+            const targetRoot = resolveDatabaseUploadRoot(req.imageTarget.dbKey);
+            fs.mkdirSync(targetRoot, { recursive: true });
+            cb(null, targetRoot);
+        } catch (error) {
+            cb(error);
+        }
     },
     filename: function (req, file, cb) {
         const fileExt = getStorageExtension(file.mimetype);
@@ -261,35 +310,31 @@ const upload = multer({
 
 imageRoutes.get('/images/stats', (req, res) => {
     try {
-        const db = getUserDb(req.user.user_id);
-        const stats = db.prepare(`
-            SELECT COUNT(*) as image_count, COALESCE(SUM(size_bytes), 0) as total_image_bytes
-            FROM images
-            WHERE user_id = ?
-        `).get(req.user.user_id);
+        const target = resolveImageTarget(req, res, 'image-stats');
+        if (!target) return res.status(404).json({ error: 'Not found', code: 'SPACE_NOT_FOUND' });
+        const stats = imageStats(target);
 
         res.json({
             imageCount: Number(stats?.image_count || 0),
             totalImageBytes: Number(stats?.total_image_bytes || 0),
-            quotaBytes: QUOTA_BYTES,
+            quotaBytes: target.quotaBytes,
         });
     } catch (error) {
-        console.error('Image stats error:', error);
-        res.status(500).json({ error: 'Failed to load image stats' });
+        return respondImageTargetError(res, error, 'image_stats_failed');
     }
 });
 
 imageRoutes.get('/images', (req, res) => {
-    const userId = req.user.user_id;
     const limit = parseLimit(req.query.limit);
     const search = String(req.query.search || '').trim();
     const sort = parseSort(req.query.sort);
     const cursor = decodeCursor(req.query.cursor);
 
     try {
-        const db = getUserDb(userId);
-        const { sql, params } = buildListQuery({ search, sort, cursor, limit });
-        const rows = db.prepare(sql).all(userId, ...params);
+        const target = resolveImageTarget(req, res, 'image-list');
+        if (!target) return res.status(404).json({ error: 'Not found', code: 'SPACE_NOT_FOUND' });
+        const { sql, params } = buildListQuery({ target, search, sort, cursor, limit });
+        const rows = target.db.prepare(sql).all(...params);
 
         const hasMore = rows.length > limit;
         const pageRows = hasMore ? rows.slice(0, limit) : rows;
@@ -300,8 +345,8 @@ imageRoutes.get('/images', (req, res) => {
             mimeType: row.mime_type,
             sizeBytes: Number(row.size_bytes || 0),
             createdAt: row.created_at,
-            url: toImageUrl(row.id),
-            usageCount: getImageUsageCount(db, row.id),
+            url: toCanonicalImageUrl(row.id, target.dbKey),
+            usageCount: getImageUsageCount(target.db, row.id),
         }));
 
         let nextCursor = null;
@@ -317,31 +362,38 @@ imageRoutes.get('/images', (req, res) => {
 
         res.json({ images, nextCursor });
     } catch (error) {
-        console.error('Image list error:', error);
-        res.status(500).json({ error: 'Failed to list images' });
+        return respondImageTargetError(res, error, 'image_list_failed');
     }
 });
 
 imageRoutes.get('/images/:id/usage', (req, res) => {
-    const userId = req.user.user_id;
     const imageId = req.params.id;
 
     try {
-        const db = getUserDb(userId);
-        const image = db.prepare('SELECT id FROM images WHERE id = ? AND user_id = ?').get(imageId, userId);
+        const target = resolveImageTarget(req, res, 'image-usage');
+        if (!target) return res.status(404).json({ error: 'Not found', code: 'SPACE_NOT_FOUND' });
+        const image = findImage(target, imageId);
         if (!image) {
             return res.status(404).json({ error: 'Image not found' });
         }
 
-        const usage = getImageUsage(db, imageId);
+        const usage = getImageUsage(target.db, imageId);
         return res.json({ imageId, usage });
     } catch (error) {
-        console.error('Image usage lookup error:', error);
-        return res.status(500).json({ error: 'Failed to load image usage' });
+        return respondImageTargetError(res, error, 'image_usage_failed');
     }
 });
 
 imageRoutes.post('/images', (req, res) => {
+    let target;
+    try {
+        target = resolveImageTarget(req, res, 'image-upload', { healthy: true });
+    } catch (error) {
+        return respondImageTargetError(res, error, 'image_upload_authorization_failed');
+    }
+    if (!target) return res.status(404).json({ error: 'Not found', code: 'SPACE_NOT_FOUND' });
+    req.imageTarget = target;
+
     upload.single('image')(req, res, (err) => {
         if (err instanceof multer.MulterError) {
             if (err.code === 'LIMIT_FILE_SIZE') {
@@ -356,7 +408,6 @@ imageRoutes.post('/images', (req, res) => {
             return res.status(400).json({ error: req.fileValidationError });
         }
 
-        const userId = req.user.user_id;
         if (!req.file) {
             return res.status(400).json({ error: 'No image file provided' });
         }
@@ -368,36 +419,47 @@ imageRoutes.post('/images', (req, res) => {
         const sha256 = crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
 
         try {
-            const db = getHealthyUserDb(userId, 'image-upload');
-            db.prepare(`
+            const currentBytes = Number(imageStats(target)?.total_image_bytes || 0);
+            if (target.quotaBytes && currentBytes + size > target.quotaBytes) {
+                fs.unlinkSync(req.file.path);
+                return res.status(413).json({
+                    error: 'Image storage quota exceeded',
+                    code: 'IMAGE_QUOTA_EXCEEDED',
+                });
+            }
+
+            target.db.prepare(`
                 INSERT INTO images (id, user_id, filename, mime_type, path, size_bytes, sha256, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            `).run(imageId, userId, normalizedOriginalName, mimetype, relativePath, size, sha256, new Date().toISOString());
+            `).run(imageId, target.userId, normalizedOriginalName, mimetype, relativePath, size, sha256, new Date().toISOString());
 
-            res.status(201).json({ id: imageId, url: toImageUrl(imageId) });
+            return res.status(201).json({ id: imageId, url: toCanonicalImageUrl(imageId, target.dbKey) });
         } catch (error) {
-            console.error('Image upload error:', error);
+            console.error('[images]', JSON.stringify({
+                event: 'image_upload_failed',
+                category: error?.code || 'upload_error',
+            }));
             fs.unlink(req.file.path, (unlinkErr) => {
                 if (unlinkErr) console.error('Error cleaning up orphaned file:', unlinkErr);
             });
-            res.status(500).json({ error: 'Upload failed' });
+            return res.status(500).json({ error: 'Upload failed' });
         }
     });
 });
 
 imageRoutes.delete('/images/:id', (req, res) => {
-    const userId = req.user.user_id;
     const imageId = req.params.id;
     const force = req.body?.force === true;
 
     try {
-        const db = getHealthyUserDb(userId, 'image-delete');
-        const image = db.prepare('SELECT id FROM images WHERE id = ? AND user_id = ?').get(imageId, userId);
+        const target = resolveImageTarget(req, res, 'image-delete', { healthy: true });
+        if (!target) return res.status(404).json({ error: 'Not found', code: 'SPACE_NOT_FOUND' });
+        const image = findImage(target, imageId);
         if (!image) {
             return res.status(404).json({ error: 'Image not found' });
         }
 
-        const usage = getImageUsage(db, imageId);
+        const usage = getImageUsage(target.db, imageId);
         if (!force && usage.count > 0) {
             return res.status(409).json({
                 error: 'Image is referenced by notes',
@@ -405,11 +467,11 @@ imageRoutes.delete('/images/:id', (req, res) => {
             });
         }
 
-        const deletion = deleteImageRecordAndFile({ db, userId, imageId });
+        const deletion = deleteImageRecordAndFile({ target, imageId });
         if (deletion.deleted) {
             console.info('[images]', JSON.stringify({
                 event: 'image_prune_delete',
-                userId: `${String(userId).slice(0, 2)}…${String(userId).slice(-2)}`,
+                dbKind: target.isSpace ? 'space' : 'user',
                 imageId: `${String(imageId).slice(0, 2)}…${String(imageId).slice(-2)}`,
                 reason: 'user-delete',
                 syncBit: 0,
@@ -421,31 +483,29 @@ imageRoutes.delete('/images/:id', (req, res) => {
 
         return res.json({ deleted: true, id: imageId });
     } catch (error) {
-        console.error('Image delete error:', error);
-        return res.status(500).json({ error: 'Failed to delete image' });
+        return respondImageTargetError(res, error, 'image_delete_failed');
     }
 });
 
 imageRoutes.post('/images/bulk-delete', (req, res) => {
-    const userId = req.user.user_id;
     const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
     const force = req.body?.force === true;
 
-    if (ids.length === 0) {
-        return res.status(400).json({ error: 'No image ids provided' });
-    }
-
     try {
-        const db = getHealthyUserDb(userId, 'image-bulk-delete');
+        const target = resolveImageTarget(req, res, 'image-bulk-delete', { healthy: true });
+        if (!target) return res.status(404).json({ error: 'Not found', code: 'SPACE_NOT_FOUND' });
+        if (ids.length === 0) {
+            return res.status(400).json({ error: 'No image ids provided' });
+        }
         const uniqueIds = [...new Set(ids.map((id) => String(id)).filter(Boolean))];
 
         const results = uniqueIds.map((imageId) => {
-            const image = db.prepare('SELECT id FROM images WHERE id = ? AND user_id = ?').get(imageId, userId);
+            const image = findImage(target, imageId);
             if (!image) {
                 return { id: imageId, deleted: false, reason: 'not-found' };
             }
 
-            const usage = getImageUsage(db, imageId);
+            const usage = getImageUsage(target.db, imageId);
             if (!force && usage.count > 0) {
                 return {
                     id: imageId,
@@ -455,7 +515,7 @@ imageRoutes.post('/images/bulk-delete', (req, res) => {
                 };
             }
 
-            const deletion = deleteImageRecordAndFile({ db, userId, imageId });
+            const deletion = deleteImageRecordAndFile({ target, imageId });
             if (!deletion.deleted && deletion.reason === 'forbidden') {
                 return { id: imageId, deleted: false, reason: 'forbidden' };
             }
@@ -465,24 +525,23 @@ imageRoutes.post('/images/bulk-delete', (req, res) => {
 
         return res.json({ results });
     } catch (error) {
-        console.error('Bulk image delete error:', error);
-        return res.status(500).json({ error: 'Failed to delete images' });
+        return respondImageTargetError(res, error, 'image_bulk_delete_failed');
     }
 });
 
 imageRoutes.get('/images/:id', (req, res) => {
-    const userId = req.user.user_id;
     const { id } = req.params;
 
     try {
-        const db = getUserDb(userId);
-        const image = db.prepare('SELECT mime_type, path FROM images WHERE id = ? AND user_id = ?').get(id, userId);
+        const target = resolveImageTarget(req, res, 'image-read');
+        if (!target) return res.status(404).json({ error: 'Not found', code: 'SPACE_NOT_FOUND' });
+        const image = findImage(target, id, 'mime_type, path');
 
         if (!image || !image.path) {
             return res.status(404).json({ error: 'Image not found or access denied' });
         }
 
-        const absolutePath = resolveUploadPath(image.path);
+        const absolutePath = resolveStoredImagePath(target.dbKey, image.path);
 
         if (!absolutePath) {
             return res.status(403).json({ error: 'Forbidden' });
@@ -494,27 +553,33 @@ imageRoutes.get('/images/:id', (req, res) => {
         }
 
         res.set('Content-Type', image.mime_type);
-        res.set('Cache-Control', 'public, max-age=31536000');
+        res.set('Cache-Control', target.isSpace ? 'private, no-store' : 'public, max-age=31536000');
         res.sendFile(absolutePath);
     } catch (error) {
-        console.error('Error serving image:', error);
-        res.status(500).json({ error: 'Failed to serve image' });
+        return respondImageTargetError(res, error, 'image_read_failed');
     }
 });
 
-export function pruneOrphanImagesForUser(userId, options = {}) {
+export function pruneOrphanImagesForDb(dbKey, options = {}) {
     const maxDeletes = Number(options.maxDeletes) > 0 ? Math.floor(options.maxDeletes) : IMAGE_PRUNE_BATCH_SIZE;
     const olderThanDays = Number(options.olderThanDays) > 0 ? Math.floor(options.olderThanDays) : IMAGE_PRUNE_MIN_AGE_DAYS;
     const cutoff = new Date(Date.now() - (olderThanDays * 24 * 60 * 60 * 1000)).toISOString();
 
-    const db = getHealthyUserDb(userId, 'image-orphan-prune');
-    const candidates = db.prepare(`
+    const isSpace = dbKey.startsWith('space:');
+    const target = {
+        dbKey,
+        db: getHealthyDb(dbKey, 'image-orphan-prune'),
+        isSpace,
+        userId: isSpace ? null : dbKey.slice('user:'.length),
+    };
+    const scope = imageScopeClause(target);
+    const candidates = target.db.prepare(`
         SELECT id
         FROM images
-        WHERE user_id = ? AND created_at <= ?
+        WHERE created_at <= ?${scope.sql}
         ORDER BY created_at ASC, id ASC
         LIMIT ?
-    `).all(userId, cutoff, maxDeletes * 5);
+    `).all(cutoff, ...scope.params, maxDeletes * 5);
 
     let deletedCount = 0;
     for (const candidate of candidates) {
@@ -522,17 +587,17 @@ export function pruneOrphanImagesForUser(userId, options = {}) {
             break;
         }
 
-        const usageCount = getImageUsageCount(db, candidate.id);
+        const usageCount = getImageUsageCount(target.db, candidate.id);
         if (usageCount > 0) {
             continue;
         }
 
-        const result = deleteImageRecordAndFile({ db, userId, imageId: candidate.id });
+        const result = deleteImageRecordAndFile({ target, imageId: candidate.id });
         if (result.deleted) {
             deletedCount += 1;
             console.info('[images]', JSON.stringify({
                 event: 'image_prune_delete',
-                userId: `${String(userId).slice(0, 2)}…${String(userId).slice(-2)}`,
+                dbKind: isSpace ? 'space' : 'user',
                 imageId: `${String(candidate.id).slice(0, 2)}…${String(candidate.id).slice(-2)}`,
                 reason: 'unused',
                 syncBit: 0,
@@ -543,18 +608,21 @@ export function pruneOrphanImagesForUser(userId, options = {}) {
     return deletedCount;
 }
 
+export function pruneOrphanImagesForUser(userId, options = {}) {
+    return pruneOrphanImagesForDb(`user:${userId}`, options);
+}
+
 export function runDailyImageOrphanPrune() {
-    const userDbIds = listUserDbIds();
     let totalDeleted = 0;
 
-    for (const userId of userDbIds) {
+    for (const dbKey of listUserDbIds()) {
         try {
-            totalDeleted += pruneOrphanImagesForUser(userId, {
+            totalDeleted += pruneOrphanImagesForDb(dbKey, {
                 maxDeletes: IMAGE_PRUNE_BATCH_SIZE,
                 olderThanDays: IMAGE_PRUNE_MIN_AGE_DAYS,
             });
         } catch (error) {
-            console.error(`[images] Daily prune failed for user ${userId}:`, error);
+            console.error(`[images] Daily prune failed for ${dbKey}:`, error);
         }
     }
 

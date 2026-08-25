@@ -10,9 +10,9 @@
         tabindex="0"
         :aria-label="`Open ${document.name}`"
         :data-testid="`continue-writing-card-${document.id}`"
-        @click="$emit('open', document.id)"
-        @keydown.enter.prevent="$emit('open', document.id)"
-        @keydown.space.prevent="$emit('open', document.id)"
+        @click="$emit('open', document)"
+        @keydown.enter.prevent="$emit('open', document)"
+        @keydown.space.prevent="$emit('open', document)"
     >
         <div class="flex items-start justify-between gap-2">
             <span
@@ -31,6 +31,12 @@
                 @toggle="$emit('toggle-pin', document)"
             />
         </div>
+
+        <span
+            v-if="document.spaceName"
+            class="pn-meta"
+            :data-testid="`continue-writing-space-${document.id}`"
+        >Shared in {{ document.spaceName }}</span>
 
         <span
             class="truncate pn-meta"

@@ -7,6 +7,9 @@ vi.mock('../../src/store/authStore.js', () => ({
 
 import { useImageManagerStore } from '../../src/store/imageManagerStore.js';
 
+const PERSONAL_DB_KEY = 'user:11111111-1111-4111-8111-111111111111';
+const SPACE_DB_KEY = 'space:22222222-2222-4222-8222-222222222222';
+
 function jsonResponse(payload, status = 200) {
     return new Response(JSON.stringify(payload), {
         status,
@@ -36,7 +39,7 @@ describe('imageManagerStore', () => {
         }));
 
         const store = useImageManagerStore();
-        await store.fetchImages({ limit: 10, cursor: 'cursor-1', search: 'alpha', sort: 'size_desc' });
+        await store.fetchImages(PERSONAL_DB_KEY, { limit: 10, cursor: 'cursor-1', search: 'alpha', sort: 'size_desc' });
 
         expect(fetchSpy).toHaveBeenCalledWith(
             'http://localhost:8000/images?limit=10&cursor=cursor-1&search=alpha&sort=size_desc',
@@ -59,10 +62,48 @@ describe('imageManagerStore', () => {
         }));
 
         const store = useImageManagerStore();
-        const stats = await store.fetchStats();
+        const stats = await store.fetchStats(PERSONAL_DB_KEY);
 
         expect(stats).toEqual({ imageCount: 3, totalImageBytes: 204, quotaBytes: 1024 });
         expect(store.stats).toEqual({ imageCount: 3, totalImageBytes: 204, quotaBytes: 1024 });
+    });
+
+    it('qualifies every image-management request and canonical image URL for a space', async () => {
+        const fetchSpy = vi.spyOn(globalThis, 'fetch');
+        fetchSpy
+            .mockResolvedValueOnce(jsonResponse({
+                images: [{
+                    id: 'shared-img',
+                    filename: 'shared.png',
+                    url: '/images/shared-img?space=22222222-2222-4222-8222-222222222222',
+                }],
+                nextCursor: null,
+            }))
+            .mockResolvedValueOnce(jsonResponse({ usage: { count: 0, notes: [] } }))
+            .mockResolvedValueOnce(jsonResponse({ deleted: true, id: 'shared-img' }))
+            .mockResolvedValueOnce(jsonResponse({ results: [] }))
+            .mockResolvedValueOnce(jsonResponse({ imageCount: 1, totalImageBytes: 12, quotaBytes: 1024 }));
+
+        const store = useImageManagerStore();
+        await store.fetchImages(SPACE_DB_KEY, { limit: 10 });
+        expect(fetchSpy.mock.calls[0][0]).toBe(
+            'http://localhost:8000/images?space=22222222-2222-4222-8222-222222222222&limit=10&sort=created_desc'
+        );
+        expect(store.images[0].imageUrl).toBe(
+            'http://localhost:8000/images/shared-img?space=22222222-2222-4222-8222-222222222222'
+        );
+
+        await store.fetchImageUsage(SPACE_DB_KEY, 'shared-img');
+        await store.deleteImage(SPACE_DB_KEY, 'shared-img', true);
+        await store.bulkDelete(SPACE_DB_KEY, ['shared-img'], true);
+        await store.fetchStats(SPACE_DB_KEY);
+
+        expect(fetchSpy.mock.calls.slice(1).map(([url]) => url)).toEqual([
+            'http://localhost:8000/images/shared-img/usage?space=22222222-2222-4222-8222-222222222222',
+            'http://localhost:8000/images/shared-img?space=22222222-2222-4222-8222-222222222222',
+            'http://localhost:8000/images/bulk-delete?space=22222222-2222-4222-8222-222222222222',
+            'http://localhost:8000/images/stats?space=22222222-2222-4222-8222-222222222222',
+        ]);
     });
 
     it('returns usage payload and defaults when usage missing', async () => {
@@ -73,8 +114,8 @@ describe('imageManagerStore', () => {
 
         const store = useImageManagerStore();
 
-        await expect(store.fetchImageUsage('img-1')).resolves.toEqual({ count: 2, notes: [{ id: 'n1', title: 'N1' }] });
-        await expect(store.fetchImageUsage('img-2')).resolves.toEqual({ count: 0, notes: [] });
+        await expect(store.fetchImageUsage(PERSONAL_DB_KEY, 'img-1')).resolves.toEqual({ count: 2, notes: [{ id: 'n1', title: 'N1' }] });
+        await expect(store.fetchImageUsage(PERSONAL_DB_KEY, 'img-2')).resolves.toEqual({ count: 0, notes: [] });
     });
 
     it('sends delete and bulk-delete requests with expected payloads', async () => {
@@ -85,7 +126,7 @@ describe('imageManagerStore', () => {
 
         const store = useImageManagerStore();
 
-        await store.deleteImage('img-1', true);
+        await store.deleteImage(PERSONAL_DB_KEY, 'img-1', true);
         expect(fetchSpy).toHaveBeenNthCalledWith(
             1,
             'http://localhost:8000/images/img-1',
@@ -99,7 +140,7 @@ describe('imageManagerStore', () => {
             })
         );
 
-        await store.bulkDelete(['img-1'], false);
+        await store.bulkDelete(PERSONAL_DB_KEY, ['img-1'], false);
         expect(fetchSpy).toHaveBeenNthCalledWith(
             2,
             'http://localhost:8000/images/bulk-delete',
@@ -123,7 +164,7 @@ describe('imageManagerStore', () => {
 
         const store = useImageManagerStore();
 
-        await expect(store.fetchImages()).rejects.toThrow('forbidden');
+        await expect(store.fetchImages(PERSONAL_DB_KEY)).rejects.toThrow('forbidden');
         expect(store.error).toBe('forbidden');
         expect(store.isLoading).toBe(false);
     });

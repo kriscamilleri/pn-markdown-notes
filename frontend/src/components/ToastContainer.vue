@@ -11,11 +11,9 @@
                 :class="getToastClass(toast.type)"
                 class="min-w-[200px] max-w-sm px-4 py-3 rounded-lg shadow-lg flex items-start justify-between"
                 role="alert"
-            > <!-- HTML is already sanitized before it reaches here -->
-                <div
-                    class="flex-1 pr-2"
-                    v-html="toast.message"
-                /> <button
+            >
+                <div class="flex-1 pr-2">{{ toast.message }}</div>
+                <button
                     @click="ui.removeToast(toast.id)"
                     class="text-lg leading-none focus:outline-none"
                     :class="getButtonClass(toast.type)"

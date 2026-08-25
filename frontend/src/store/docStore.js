@@ -1,18 +1,24 @@
 // /frontend/src/store/docStore.js
-import { ref } from "vue";
+import { ref, computed } from "vue";
 import { defineStore } from "pinia";
 import { storeToRefs } from "pinia";
 import { useStructureStore } from "./structureStore";
 import { useMarkdownStore } from "./markdownStore";
 import { useSyncStore } from "./syncStore";
+import { useDraftStore } from "./draftStore";
 import { useImportExportStore } from "./importExportStore";
+import { useConflictStore } from "./conflictStore";
 import { normalizeRecentDocument } from "../utils/recentDocuments.js";
+import { hasDocumentContentChanged } from "../utils/documentPersistence.js";
+import { mergeDashboardRows } from "../utils/syncRegistry.js";
 
 export const useDocStore = defineStore("docStore", () => {
   const structureStore = useStructureStore();
   const markdownStore = useMarkdownStore();
   const syncStore = useSyncStore();
+  const draftStore = useDraftStore();
   const importExportStore = useImportExportStore();
+  const conflictStore = useConflictStore();
   const isSaving = ref(false);
   const recentDocVersion = ref(0);
 
@@ -20,6 +26,7 @@ export const useDocStore = defineStore("docStore", () => {
   const {
     selectedFileId,
     selectedFolderId,
+    selectedDbKey,
     openFolders,
     rootItems,
     selectedFile,
@@ -29,25 +36,40 @@ export const useDocStore = defineStore("docStore", () => {
 
   const { styles, printStyles } = storeToRefs(markdownStore);
 
+  /**
+   * True when the open document has local edits that differ from its base and
+   * have not yet been persisted. Consumed by the editor's save-status surface.
+   * See COLLAB-01.
+   */
+  const isDirty = computed(() => {
+    const id = selectedFileId.value;
+    if (!id) return false;
+    const draft = draftStore.getDraft(id);
+    if (draft === undefined) return false;
+    const base = draftStore.getBase(id) ?? selectedFile.value?.content ?? "";
+    return hasDocumentContentChanged(base, draft);
+  });
+
   async function loadInitialData() {
     // This is now mainly for selecting a default file after the initial sync
     await structureStore.loadRootItems(); // Ensure root items are loaded
     if (structureStore.rootItems.length > 0 && !structureStore.selectedFileId) {
       const firstFile = structureStore.rootItems.find(
-        (item) => item.type === "file",
+        (item) => item.type === "file" && item.dbKey === syncStore.personalDbKey,
       );
       if (firstFile) {
-        structureStore.selectFile(firstFile.id);
+        structureStore.selectFile(firstFile.id, firstFile.dbKey);
       }
     }
   }
   async function refreshData() {
-    console.log("[DocStore] Refreshing data after sync.");
+    console.info("[DocStore] Refreshing data after sync.");
     await structureStore.loadRootItems();
     if (structureStore.selectedFileId) {
       // This is the key change: explicitly re-fetch the current file's data
       await structureStore.reFetchSelectedFile();
     }
+    await conflictStore.loadConflicts();
     recentDocVersion.value++;
   }
 
@@ -56,7 +78,7 @@ export const useDocStore = defineStore("docStore", () => {
     structureStore.resetStore();
     markdownStore.resetStyles();
     markdownStore.resetPrintStyles();
-    console.log("All stores have been reset.");
+    console.info("All stores have been reset.");
   }
 
   /**
@@ -110,11 +132,22 @@ ${DOCUMENT_COLUMNS}
             FROM notes
             LEFT JOIN folder_paths ON folder_paths.id = notes.folder_id
             ORDER BY datetime(notes.updated_at) DESC
-            LIMIT ?
         `;
     try {
-      const results = await syncStore.execute(query, [limit]);
-      return (results || []).map(normalizeRecentDocument);
+      const groups = [];
+      for (const entry of syncStore.databases.values()) {
+        if (!entry.db) continue;
+        try {
+          groups.push({
+            dbKey: entry.dbKey,
+            name: entry.kind === 'space' ? entry.name : null,
+            rows: await syncStore.repository(entry.dbKey).execute(query),
+          });
+        } catch (error) {
+          console.error(`Failed to query recent Documents for ${entry.dbKey}:`, error);
+        }
+      }
+      return mergeDashboardRows(groups, { limit }).map(normalizeRecentDocument);
     } catch (error) {
       console.error("Failed to get recent documents:", error);
       return [];
@@ -131,7 +164,8 @@ ${DOCUMENT_COLUMNS}
    * @param {number} [limit] bounded result size
    * @returns {Promise<object[]>} normalized documents, newest first
    */
-  async function getFolderDocuments(folderId, limit = 50) {
+  async function getFolderDocuments(folderId, dbKey, limit = 50) {
+    if (!dbKey) throw new Error('Database scope is required for a folder dashboard.');
     const query = `
             ${FOLDER_PATHS_CTE}
 
@@ -141,11 +175,13 @@ ${DOCUMENT_COLUMNS}
             LEFT JOIN folder_paths ON folder_paths.id = notes.folder_id
             WHERE notes.folder_id IS ?
             ORDER BY datetime(notes.updated_at) DESC
-            LIMIT ?
         `;
     try {
-      const results = await syncStore.execute(query, [folderId ?? null, limit]);
-      return (results || []).map(normalizeRecentDocument);
+      const entry = syncStore.databases.get(dbKey);
+      const results = await syncStore.repository(dbKey).execute(query, [folderId ?? null]);
+      return mergeDashboardRows([
+        { dbKey, name: entry?.kind === 'space' ? entry.name : null, rows: results },
+      ], { limit }).map(normalizeRecentDocument);
     } catch (error) {
       console.error("Failed to get folder documents:", error);
       return [];
@@ -160,13 +196,14 @@ ${DOCUMENT_COLUMNS}
    * @param {boolean} pinned
    * @returns {Promise<void>} rejects so the caller can revert its optimistic state
    */
-  async function setDocumentPinned(noteId, pinned) {
+  async function setDocumentPinned(noteId, pinned, dbKey) {
     if (!noteId) throw new Error("A document id is required to change pin state.");
+    if (!dbKey) throw new Error('Database scope is required to change pin state.');
 
-    await syncStore.db.value.exec(
+    await syncStore.repository(dbKey).transaction((repo) => repo.exec(
       "UPDATE notes SET pinned = ?, updated_at = ? WHERE id = ?",
       [pinned ? 1 : 0, new Date().toISOString(), noteId],
-    );
+    ));
 
     if (selectedFile.value?.id === noteId) {
       selectedFile.value.pinned = pinned ? 1 : 0;
@@ -174,13 +211,24 @@ ${DOCUMENT_COLUMNS}
     structureStore.markContentChanged();
   }
 
-  async function updateFileContent(fileId, newContent) {
+  async function updateFileContent(fileId, newContent, dbKey) {
+    if (!dbKey) throw new Error('Database scope is required to update a Document.');
     isSaving.value = true; // <--- Set to true
     try {
-      await syncStore.db.value.exec(
-        "UPDATE notes SET content = ?, updated_at = ? WHERE id = ?",
-        [newContent, new Date().toISOString(), fileId],
-      );
+      const now = new Date().toISOString();
+      await syncStore.repository(dbKey).transaction(async (repo) => {
+        await repo.exec(
+          "UPDATE notes SET content = ?, updated_at = ? WHERE id = ?",
+          [newContent, now, fileId],
+        );
+        await repo.exec(
+          `INSERT INTO note_sync_base (note_id, content, updated_at)
+           VALUES (?, ?, ?)
+           ON CONFLICT(note_id) DO UPDATE SET content = excluded.content, updated_at = excluded.updated_at`,
+          [fileId, newContent ?? "", now],
+        );
+      });
+      draftStore.setBase(fileId, newContent);
       if (selectedFile.value?.id === fileId) {
         selectedFile.value.content = newContent; // Optimistic update
       }
@@ -197,6 +245,7 @@ ${DOCUMENT_COLUMNS}
     // State & Getters (forwarded refs)
     selectedFileId,
     selectedFolderId,
+    selectedDbKey,
     openFolders,
     styles,
     printStyles,
@@ -223,6 +272,7 @@ ${DOCUMENT_COLUMNS}
     selectFile: structureStore.selectFile,
     selectFolder: structureStore.selectFolder,
     toggleFolder: structureStore.toggleFolder,
+    isFolderOpen: structureStore.isFolderOpen,
     duplicateFile: structureStore.duplicateFile,
     updateFileContent: updateFileContent, // structureStore.updateFileContent,
 
@@ -246,5 +296,6 @@ ${DOCUMENT_COLUMNS}
     refreshData, // Expose the new function
     recentDocVersion,
     isSaving,
+    isDirty,
   };
 });

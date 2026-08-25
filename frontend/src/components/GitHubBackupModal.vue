@@ -12,6 +12,13 @@
             </p>
 
             <div
+                class="pn-alert pn-alert-info"
+                data-testid="github-backup-personal-only"
+            >
+                GitHub Backup includes only your personal Documents, folders, and images. Shared spaces are excluded and are protected separately by the server's disaster-recovery backups.
+            </div>
+
+            <div
                 v-if="store.error"
                 class="pn-alert pn-alert-error"
                 data-testid="github-backup-modal-store-error"

@@ -3,8 +3,11 @@ version: '3.8'
 
 services:
   api-service:
-    build: ./backend/api-service
+    build:
+      context: .
+      dockerfile: backend/api-service/Dockerfile
     restart: always
+    stop_grace_period: 15s
     dns:
       - 8.8.8.8
       - 8.8.4.4
@@ -12,6 +15,8 @@ services:
       JWT_SECRET: ${JWT_SECRET}
       PORT: 8000
       NODE_ENV: production
+      SHARED_SPACES_ENABLED: ${SHARED_SPACES_ENABLED:-false}
+      LIVE_SESSIONS_ENABLED: ${LIVE_SESSIONS_ENABLED:-false}
       TURNSTILE_SECRET_KEY: ${TURNSTILE_SECRET_KEY}
       GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
       GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
@@ -26,8 +31,8 @@ services:
       SMTP_FROM: ${SMTP_FROM}
       FRONTEND_URL: ${FRONTEND_URL}
     volumes:
-      - api-data:/app/data # Persist SQLite DBs
-      - uploads-data:/app/uploads # Persist uploaded files
+      - api-data:/app/backend/api-service/data # Persist SQLite DBs
+      - uploads-data:/app/backend/api-service/uploads # Persist uploaded files
     ports:
       - "127.0.0.1:8000:8000"
 

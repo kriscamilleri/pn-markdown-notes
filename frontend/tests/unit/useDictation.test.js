@@ -123,6 +123,7 @@ describe('useDictation', () => {
         setActivePinia(createPinia());
         vi.useFakeTimers();
         vi.restoreAllMocks();
+        vi.spyOn(console, 'warn').mockImplementation(() => {});
     });
 
     afterEach(() => {

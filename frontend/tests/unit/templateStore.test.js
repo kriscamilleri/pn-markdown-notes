@@ -120,12 +120,12 @@ describe("templateStore – method signatures", () => {
     );
   });
 
-  it("declares duplicateTemplate as an async function with (id) param", () => {
-    expect(source).toMatch(/async\s+function\s+duplicateTemplate\s*\(id\)/);
+  it("declares duplicateTemplate with an explicit database scope", () => {
+    expect(source).toMatch(/async\s+function\s+duplicateTemplate\s*\(dbKey,\s*id\)/);
   });
 
-  it("declares deleteTemplate as an async function with (id) param", () => {
-    expect(source).toMatch(/async\s+function\s+deleteTemplate\s*\(id\)/);
+  it("declares deleteTemplate with an explicit database scope", () => {
+    expect(source).toMatch(/async\s+function\s+deleteTemplate\s*\(dbKey,\s*id\)/);
   });
 });
 
@@ -156,7 +156,7 @@ describe("templateStore – SQL patterns", () => {
 
   it("createTemplate reloads templates and shows a success toast", () => {
     const body = functionBody("createTemplate");
-    expect(body).toMatch(/await\s+loadTemplates\(\)/);
+    expect(body).toMatch(/await\s+loadTemplates\(dbKey\)/);
     expect(body).toMatch(/uiStore\.addToast\(.*Template created/);
   });
 
@@ -230,35 +230,34 @@ describe("templateStore – error handling", () => {
   });
 });
 
-describe("templateStore – syncStore usage", () => {
+describe("templateStore – scoped repository usage", () => {
   it("references syncStore from useSyncStore for all DB operations", () => {
     expect(source).toMatch(/const\s+syncStore\s*=\s*useSyncStore\(\)/);
   });
 
-  it("uses syncStore.execute for loadTemplates", () => {
+  it("requires a scoped repository for loadTemplates", () => {
     const body = functionBody("loadTemplates");
-    expect(body).toMatch(/syncStore\.execute\(/);
+    expect(body).toMatch(/syncStore\.repository\(dbKey\)\.execute\(/);
   });
 
-  it("uses syncStore.execute for createTemplate", () => {
+  it("uses a scoped transaction for createTemplate", () => {
     const body = functionBody("createTemplate");
-    expect(body).toMatch(/syncStore\.execute\(/);
+    expect(body).toMatch(/syncStore\.repository\(dbKey\)\.transaction\(/);
   });
 
-  it("uses syncStore.execute for updateTemplate", () => {
+  it("uses a scoped transaction for updateTemplate", () => {
     const body = functionBody("updateTemplate");
-    expect(body).toMatch(/syncStore\.execute\(/);
+    expect(body).toMatch(/syncStore\.repository\(dbKey\)\.transaction\(/);
   });
 
-  it("uses syncStore.execute for duplicateTemplate (both SELECT and INSERT)", () => {
+  it("uses the same scoped repository for duplicateTemplate read and write", () => {
     const body = functionBody("duplicateTemplate");
-    const matches = body.match(/syncStore\.execute\(/g);
-    expect(matches).not.toBeNull();
-    expect(matches.length).toBe(2);
+    expect(body).toMatch(/syncStore\.repository\(dbKey\)\.execute\(/);
+    expect(body).toMatch(/syncStore\.repository\(dbKey\)\.transaction\(/);
   });
 
-  it("uses syncStore.execute for deleteTemplate", () => {
+  it("uses a scoped transaction for deleteTemplate", () => {
     const body = functionBody("deleteTemplate");
-    expect(body).toMatch(/syncStore\.execute\(/);
+    expect(body).toMatch(/syncStore\.repository\(dbKey\)\.transaction\(/);
   });
 });

@@ -72,6 +72,9 @@ describe('normalizeRecentDocument', () => {
             excerpt: 'First paragraph with several words.',
             wordCount: 5,
             isPinned: true,
+            dbKey: undefined,
+            spaceName: null,
+            visibility: 'Private',
         });
     });
 

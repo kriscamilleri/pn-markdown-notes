@@ -44,7 +44,7 @@ export default defineConfig(({ mode }) => {
             JSON.stringify(appVersion)
           );
           fs.writeFileSync(swDest, replaced);
-          console.log('✓ Service worker copied to dist/');
+          console.info('✓ Service worker copied to dist/');
         }
       }
     }

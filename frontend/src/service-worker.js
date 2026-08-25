@@ -29,13 +29,13 @@ const PRECACHE_ASSETS = [
 
 // Install event - precache essential assets
 self.addEventListener("install", (event) => {
-  console.log("[SW] Installing service worker...");
+  console.info("[SW] Installing service worker...");
 
   event.waitUntil(
     caches
       .open(CACHE_NAME)
       .then((cache) => {
-        console.log("[SW] Precaching assets");
+        console.info("[SW] Precaching assets");
         // Cache assets individually to prevent one failure from blocking all
         return Promise.allSettled(
           PRECACHE_ASSETS.map((url) =>
@@ -46,7 +46,7 @@ self.addEventListener("install", (event) => {
         );
       })
       .then(() => {
-        console.log("[SW] Skip waiting");
+        console.info("[SW] Skip waiting");
         return self.skipWaiting();
       }),
   );
@@ -54,7 +54,7 @@ self.addEventListener("install", (event) => {
 
 // Activate event - clean up old caches
 self.addEventListener("activate", (event) => {
-  console.log("[SW] Activating service worker...");
+  console.info("[SW] Activating service worker...");
 
   event.waitUntil(
     caches
@@ -64,13 +64,13 @@ self.addEventListener("activate", (event) => {
           cacheNames
             .filter((name) => name !== CACHE_NAME && name !== RUNTIME_CACHE)
             .map((name) => {
-              console.log("[SW] Deleting old cache:", name);
+              console.info("[SW] Deleting old cache:", name);
               return caches.delete(name);
             }),
         );
       })
       .then(() => {
-        console.log("[SW] Claiming clients");
+        console.info("[SW] Claiming clients");
         return self.clients.claim();
       }),
   );
@@ -181,7 +181,7 @@ self.addEventListener("message", (event) => {
 // Periodic background sync (if supported)
 self.addEventListener("sync", (event) => {
   if (event.tag === "sync-notes") {
-    console.log("[SW] Background sync requested");
+    console.info("[SW] Background sync requested");
     event.waitUntil(
       // The actual sync will be handled by the app when it wakes up
       self.clients.matchAll().then((clients) => {

@@ -115,4 +115,3 @@ export default class Stmt {
         }, tx?.__mutex || this.originDB.__mutex);
     }
 }
-//# sourceMappingURL=Stmt.js.map

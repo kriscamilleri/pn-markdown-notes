@@ -4,6 +4,24 @@ import request from 'supertest';
 import { createTestApp, setupTestUser, cleanupTestUser, getTestToken } from '../testHelpers.js';
 
 import { readFileSync } from 'node:fs';
+import { parseInternalImageSource } from '../../pdf.js';
+
+describe('qualified PDF image parsing', () => {
+    const imageId = '11111111-1111-4111-8111-111111111111';
+    const spaceId = '22222222-2222-4222-8222-222222222222';
+
+    it('accepts canonical relative personal and space images after HTML entity encoding', () => {
+        expect(parseInternalImageSource(`/images/${imageId}`)).toEqual({ imageId, spaceId: null });
+        expect(parseInternalImageSource(
+            `/images/${imageId}?space=${spaceId}&amp;token=signed`,
+        )).toEqual({ imageId, spaceId });
+    });
+
+    it('rejects external lookalikes and noncanonical query strings', () => {
+        expect(parseInternalImageSource(`https://attacker.test/images/${imageId}`)).toBeNull();
+        expect(parseInternalImageSource(`/images/${imageId}?space=${spaceId}&other=1`)).toBeNull();
+    });
+});
 
 // `poc/` is a proof of concept and is not part of the production image. pdf.js used to read
 // `poc/print-defaults.json` two directories up, which always threw ENOENT in production and

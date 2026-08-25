@@ -4,7 +4,9 @@ version: '3.8'
 services:
   # The unified backend service for auth, sync, and images
   api-service:
-    build: ./backend/api-service
+    build:
+      context: .
+      dockerfile: backend/api-service/Dockerfile
     ports:
       - "127.0.0.1:8000:8000"
       - "127.0.0.1:9229:9229" # Node.js debugger
@@ -16,6 +18,8 @@ services:
       JWT_SECRET: ${JWT_SECRET:-super-secret-for-dev}
       PORT: 8000
       NODE_ENV: development
+      SHARED_SPACES_ENABLED: ${SHARED_SPACES_ENABLED:-false}
+      LIVE_SESSIONS_ENABLED: ${LIVE_SESSIONS_ENABLED:-false}
       GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
       GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
       PUBLIC_API_BASE_URL: ${PUBLIC_API_BASE_URL:-http://localhost:8000}
@@ -29,10 +33,11 @@ services:
       SMTP_FROM: ${SMTP_FROM:-"Panino Dev <noreply@panino.dev>"}
       FRONTEND_URL: ${FRONTEND_URL:-http://localhost:5173}
     volumes:
-      - ./backend/api-service:/app
-      - ./backend/api-service/data:/app/data # Persist SQLite DBs
-      - ./backend/api-service/uploads:/app/uploads # Persist uploaded files
-      - /app/node_modules
+      - ./backend/api-service:/app/backend/api-service
+      - ./shared:/app/shared:ro
+      - ./backend/api-service/data:/app/backend/api-service/data # Persist SQLite DBs
+      - ./backend/api-service/uploads:/app/backend/api-service/uploads # Persist uploaded files
+      - /app/backend/api-service/node_modules
 
   # Add MailHog for local email testing
   mailhog:
@@ -43,8 +48,8 @@ services:
 
   frontend:
     build:
-      context: ./frontend
-      dockerfile: Dockerfile.dev
+      context: .
+      dockerfile: frontend/Dockerfile.dev
     ports:
       - "127.0.0.1:5173:5173"
     environment:
@@ -53,6 +58,7 @@ services:
       VITE_TURNSTILE_SITE_KEY: ${VITE_TURNSTILE_SITE_KEY}
     volumes:
       - ./frontend:/app
+      - ./shared:/shared:ro
       - /app/node_modules
     command: npm run dev -- --host
     depends_on:

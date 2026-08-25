@@ -21,13 +21,13 @@
         <ul class="flex flex-wrap gap-2">
             <li
                 v-for="folder in folders"
-                :key="folder.id"
+                :key="folder.treeKey || folder.id"
             >
                 <button
                     type="button"
                     class="inline-flex min-h-[40px] max-w-full items-center gap-2 rounded-md border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 transition-colors hover:bg-gray-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gray-500 focus-visible:ring-offset-2"
                     :data-testid="`folder-navigation-item-${folder.id}`"
-                    @click="$emit('open-folder', folder.id)"
+                    @click="$emit('open-folder', folder)"
                 >
                     <Folder
                         class="h-4 w-4 shrink-0 text-gray-500"

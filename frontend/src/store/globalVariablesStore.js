@@ -13,6 +13,7 @@ export const useGlobalVariablesStore = defineStore('globalVariablesStore', () =>
 
     const globals = ref([]);
     const isLoaded = ref(false);
+    const activeDbKey = ref(null);
 
     function normalizeVariableName(name) {
         return (name || '').trim().replace(/\s+/g, ' ').toLowerCase();
@@ -30,15 +31,14 @@ export const useGlobalVariablesStore = defineStore('globalVariablesStore', () =>
         return map;
     });
 
-    async function loadGlobals() {
+    async function loadGlobals(dbKey) {
         if (!syncStore.isInitialized) return;
+        if (!dbKey) throw new Error('Database scope is required to load variables.');
         try {
-            if (syncStore.ensureGlobalsSchema) {
-                await syncStore.ensureGlobalsSchema();
-            }
-            const rows = await syncStore.execute(
+            const rows = await syncStore.repository(dbKey).execute(
                 `SELECT id, key, value, created_at, updated_at, display_key FROM globals ORDER BY display_key COLLATE NOCASE ASC`
             );
+            activeDbKey.value = dbKey;
             globals.value = (rows || []).map(r => ({
                 id: r.id,
                 key: r.key,
@@ -54,7 +54,8 @@ export const useGlobalVariablesStore = defineStore('globalVariablesStore', () =>
         }
     }
 
-    async function saveGlobalVariable(name, value) {
+    async function saveGlobalVariable(dbKey, name, value) {
+        if (!dbKey) throw new Error('Database scope is required to save a variable.');
         const normalizedKey = normalizeVariableName(name);
         const displayKey = normalizeDisplayName(name);
         if (!normalizedKey) {
@@ -63,20 +64,18 @@ export const useGlobalVariablesStore = defineStore('globalVariablesStore', () =>
         }
         const now = new Date().toISOString();
         try {
-            if (syncStore.ensureGlobalsSchema) {
-                await syncStore.ensureGlobalsSchema();
-            }
             let existing;
             try {
-                existing = await syncStore.execute(
+                existing = await syncStore.repository(dbKey).execute(
                     `SELECT id, created_at FROM globals WHERE key = ?`,
                     [normalizedKey]
                 );
             } catch (queryErr) {
                 const msg = String(queryErr?.message || queryErr);
-                if (msg.includes('no such column: id') && syncStore.ensureGlobalsSchema) {
-                    await syncStore.ensureGlobalsSchema();
-                    existing = await syncStore.execute(
+                if (msg.includes('no such column: id')) {
+                    const database = syncStore.databases.get(dbKey)?.db;
+                    await syncStore.ensureGlobalsSchema(database);
+                    existing = await syncStore.repository(dbKey).execute(
                         `SELECT id, created_at FROM globals WHERE key = ?`,
                         [normalizedKey]
                     );
@@ -88,16 +87,16 @@ export const useGlobalVariablesStore = defineStore('globalVariablesStore', () =>
             const row = existing?.[0];
             const id = row?.id || uuidv4();
             const createdAt = row?.created_at || now;
-            await syncStore.execute(
-                `INSERT INTO globals (id, key, display_key, value, created_at, updated_at)
-                 VALUES (?, ?, ?, ?, ?, ?)
-                 ON CONFLICT(key) DO UPDATE SET
-                   display_key = excluded.display_key,
-                   value = excluded.value,
-                   updated_at = excluded.updated_at`,
-                [id, normalizedKey, displayKey, value ?? '', createdAt, now]
-            );
-            await loadGlobals();
+            await syncStore.repository(dbKey).transaction((repo) => repo.exec(
+              `INSERT INTO globals (id, key, display_key, value, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(key) DO UPDATE SET
+                 display_key = excluded.display_key,
+                 value = excluded.value,
+                 updated_at = excluded.updated_at`,
+              [id, normalizedKey, displayKey, value ?? '', createdAt, now]
+            ));
+            await loadGlobals(dbKey);
             return true;
         } catch (err) {
             console.error('[globalVariablesStore] Failed to save global', err);
@@ -106,12 +105,15 @@ export const useGlobalVariablesStore = defineStore('globalVariablesStore', () =>
         }
     }
 
-    async function deleteGlobalVariable(nameOrKey) {
+    async function deleteGlobalVariable(dbKey, nameOrKey) {
+        if (!dbKey) throw new Error('Database scope is required to delete a variable.');
         const normalizedKey = normalizeVariableName(nameOrKey);
         if (!normalizedKey) return false;
         try {
-            await syncStore.execute(`DELETE FROM globals WHERE key = ?`, [normalizedKey]);
-            await loadGlobals();
+            await syncStore.repository(dbKey).transaction((repo) => repo.exec(
+                `DELETE FROM globals WHERE key = ?`, [normalizedKey]
+            ));
+            await loadGlobals(dbKey);
             return true;
         } catch (err) {
             console.error('[globalVariablesStore] Failed to delete global', err);
@@ -129,7 +131,7 @@ export const useGlobalVariablesStore = defineStore('globalVariablesStore', () =>
     watch(() => [syncStore.isInitialized, authStore.user?.id], ([ready]) => {
         if (ready) {
             isLoaded.value = false;
-            loadGlobals();
+            loadGlobals(syncStore.personalDbKey);
         }
     }, { immediate: true });
 
@@ -137,6 +139,7 @@ export const useGlobalVariablesStore = defineStore('globalVariablesStore', () =>
         globals,
         globalsMap,
         isLoaded,
+        activeDbKey,
         normalizeVariableName,
         normalizeDisplayName,
         loadGlobals,

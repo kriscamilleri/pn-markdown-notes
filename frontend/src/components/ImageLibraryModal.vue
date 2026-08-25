@@ -184,11 +184,16 @@ import BaseModal from '@/components/BaseModal.vue';
 import BaseButton from '@/components/BaseButton.vue';
 import { useImageManagerStore } from '@/store/imageManagerStore';
 import { useAuthStore } from '@/store/authStore';
+import { withImageAuthToken } from '@/utils/imageUrl';
 
 const PAGE_LIMIT = 25;
 
 const props = defineProps({
     show: Boolean,
+    dbKey: {
+        type: String,
+        required: true,
+    },
 });
 
 const emit = defineEmits(['close', 'insert-selected']);
@@ -233,14 +238,14 @@ function formatBytes(bytes) {
 }
 
 function imagePreviewUrl(url) {
-    if (!authStore.token) return url;
-    const parsed = new URL(url, window.location.origin);
-    parsed.searchParams.set('token', authStore.token);
-    return import.meta.env.PROD ? `${parsed.pathname}${parsed.search}` : parsed.href;
+    return withImageAuthToken(url, authStore.token, {
+        origin: window.location.origin,
+        absolute: !import.meta.env.PROD,
+    });
 }
 
 async function loadPage(cursor = null) {
-    await imageManager.fetchImages({
+    await imageManager.fetchImages(props.dbKey, {
         limit: PAGE_LIMIT,
         cursor,
         search: search.value.trim(),
@@ -258,7 +263,7 @@ async function applyFilters() {
     currentCursor.value = null;
     await Promise.all([
         loadPage(null),
-        imageManager.fetchStats(),
+        imageManager.fetchStats(props.dbKey),
     ]);
 }
 
@@ -298,8 +303,8 @@ function insertSelected() {
 }
 
 watch(
-    () => props.show,
-    async (show) => {
+    () => [props.show, props.dbKey],
+    async ([show]) => {
         if (!show) return;
         selectedSet.value = new Set();
         await applyFilters();

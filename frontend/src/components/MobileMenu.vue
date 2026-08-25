@@ -61,6 +61,26 @@
             </BaseButton>
 
             <BaseButton
+                v-if="authStore.isAuthenticated"
+                @click="goToSettings"
+                class="w-full"
+                data-testid="mobile-menu-settings-button"
+            >
+                <Settings class="w-4 h-4" />
+                <span>Account Settings</span>
+            </BaseButton>
+
+            <BaseButton
+                v-if="authStore.isAuthenticated && syncStore.sharedSpacesAvailable"
+                @click="goToSpaces"
+                class="w-full"
+                data-testid="mobile-menu-spaces-button"
+            >
+                <Users class="w-4 h-4" />
+                <span>Spaces</span>
+            </BaseButton>
+
+            <BaseButton
                 as="a"
                 href="https://github.com/kriscamilleri/pn-markdown-notes"
                 target="_blank"
@@ -111,7 +131,7 @@ import { useSyncStore } from '@/store/syncStore'
 import { useUiStore } from '@/store/uiStore'
 import { useRouter } from 'vue-router'
 import BaseButton from '@/components/BaseButton.vue'
-import { RefreshCw, Info, LogIn, LogOut, Image, History } from 'lucide-vue-next'
+import { RefreshCw, Info, LogIn, LogOut, Image, History, Settings, Users } from 'lucide-vue-next'
 
 const emit = defineEmits(['close'])
 const authStore = useAuthStore()
@@ -135,7 +155,7 @@ async function handleToggleSync() {
     // If trying to enable sync (currently disabled)
     if (!syncStore.syncEnabled) {
         // Try refreshing the token if sync was disabled due to auth failure
-        console.log('[MobileMenu] Attempting to refresh token before enabling sync...');
+        console.info('[MobileMenu] Attempting to refresh token before enabling sync...');
         const refreshed = await authStore.refreshToken();
         if (!refreshed) {
             uiStore.addToast('Session expired. Please log in again to enable sync.', 'warning');
@@ -175,6 +195,16 @@ function goToImages() {
 
 function goToRevisions() {
     router.push('/revisions')
+    emit('close')
+}
+
+function goToSettings() {
+    router.push('/settings')
+    emit('close')
+}
+
+function goToSpaces() {
+    router.push('/spaces')
     emit('close')
 }
 </script>

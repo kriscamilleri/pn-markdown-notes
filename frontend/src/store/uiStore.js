@@ -60,7 +60,7 @@ export const useUiStore = defineStore("uiStore", () => {
       scrollSync: scrollSync.value,
     };
     try {
-      await syncStore.execute(
+      await syncStore.personalRepository().exec(
         `INSERT OR REPLACE INTO settings (id, value) VALUES (?, ?)`,
         ["uiSettings", JSON.stringify(settings)],
       );
@@ -72,7 +72,7 @@ export const useUiStore = defineStore("uiStore", () => {
   async function loadSettingsFromDB() {
     if (!syncStore.isInitialized) return;
     try {
-      const results = await syncStore.execute(
+      const results = await syncStore.personalRepository().execute(
         `SELECT value FROM settings WHERE id = 'uiSettings'`,
       );
       // CORRECTED: Access the first element of the array directly

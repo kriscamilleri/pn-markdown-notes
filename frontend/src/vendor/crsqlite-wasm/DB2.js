@@ -28,4 +28,3 @@ export {};
 //     this.#siteid = siteid;
 //   }
 // }
-//# sourceMappingURL=DB2.js.map

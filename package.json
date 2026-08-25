@@ -3,7 +3,8 @@
     "minimist": "^1.2.8"
   },
   "scripts": {
-    "test": "npm run test:fe && npm run test:be",
+    "test": "npm run test:shared && npm run test:fe && npm run test:be",
+    "test:shared": "npm test --prefix shared",
     "test:fe": "./scripts/test-frontend.sh",
     "test:be": "./scripts/test-backend.sh",
     "test:be:host": "npm test --prefix backend/api-service",

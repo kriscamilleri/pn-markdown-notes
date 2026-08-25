@@ -38,6 +38,7 @@ Every store uses `defineStore('name', () => { ... })` setup-style pattern.
 | `uiStore` | Panel visibility (persisted to DB), menus, modals, toast notifications | syncStore |
 | `globalVariablesStore` | Global template variables CRUD, normalized key lookup | syncStore, authStore, uiStore |
 | `importExportStore` | JSON/ZIP/StackEdit/SQLite export, JSON/StackEdit import | syncStore, structureStore, authStore |
+| `spacesStore` | Server-backed lifecycle, member/invitation management, ownership, leave/deletion, and invite acceptance | syncStore, authStore |
 
 ### Store initialization pattern
 
@@ -55,16 +56,25 @@ Many stores also watch `authStore.user?.id` to reload on user switch.
 ## DB Access Patterns
 
 ```javascript
-// READ — returns array of row objects
-const rows = await syncStore.execute('SELECT * FROM notes WHERE id = ?', [id]);
+// Resolve a repository once from a canonical `user:<uuid>` / `space:<uuid>` key.
+const repository = syncStore.repository(dbKey);
 
-// WRITE — no return value
-syncStore.db.value.exec('INSERT INTO notes (id, title) VALUES (?, ?)', [id, title]);
+// READ — returns array of row objects
+const rows = await repository.execute('SELECT * FROM notes WHERE id = ?', [id]);
+
+// WRITE — keep application writes transactional
+await repository.transaction((tx) =>
+  tx.exec('UPDATE notes SET title = ? WHERE id = ?', [title, id])
+);
 ```
 
-- `syncStore.execute()` → reads (returns `execO` — array of objects).
-- `syncStore.db.value.exec()` → writes (no return value).
-- Wrap multi-statement writes in `BEGIN` / `COMMIT` / `ROLLBACK`.
+- Public store operations require an explicit canonical database key; never accept a bare UUID
+  or silently fall back to the personal database.
+- `repository.execute()` returns `execO` row objects; `repository.exec()` performs statements.
+- Use `syncStore.personalRepository()` only for deliberately personal-only settings/import/export
+  adapters, not as an ambient default for document operations.
+- `repository.transaction()` supplies scoped `execute`/`exec` methods and handles
+  `BEGIN` / `COMMIT` / `ROLLBACK`.
 
 ---
 
@@ -128,5 +138,7 @@ Today: {{ GLOBAL_DATE }}
 - **Circular dependency avoidance**: use dynamic `await import('./storeName')` when stores have circular refs (see `syncStore` importing `uiStore`).
 - **Tailwind CSS** for styling; scoped `<style scoped>` blocks with `:deep()` for child component overrides.
 - **Lucide Vue Next** for icons.
+- Shared-space management lives at `/spaces`; invitation landing is explicit (never auto-accepts)
+  and posts the raw email token in the request body before removing it from the address bar.
 - **`@/`** path alias resolves to `frontend/src/`.
 - **No TypeScript** — plain JavaScript throughout.

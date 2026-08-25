@@ -1,6 +1,20 @@
 <template>
     <AccountLayout title="Images" max-width-class="max-w-7xl">
         <div class="space-y-6">
+            <label class="block max-w-md">
+                <span class="pn-label">Image library</span>
+                <select
+                    v-model="selectedDbKey"
+                    class="pn-select mt-1 w-full"
+                    data-testid="images-database-scope"
+                    @change="handleScopeChange"
+                >
+                    <option v-for="scope in availableScopes" :key="scope.dbKey" :value="scope.dbKey">
+                        {{ scope.label }}
+                    </option>
+                </select>
+            </label>
+
             <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <div class="pn-body">
                     <p>Images: {{ imageManager.stats.imageCount }}</p>
@@ -154,20 +168,34 @@ import { ChevronLeft, ChevronRight, RefreshCw, Trash2 } from 'lucide-vue-next';
 import AccountLayout from '@/components/AccountLayout.vue';
 import BaseButton from '@/components/BaseButton.vue';
 import { useImageManagerStore } from '@/store/imageManagerStore';
+import { useSyncStore } from '@/store/syncStore';
 import { useAuthStore } from '@/store/authStore';
 import { useUiStore } from '@/store/uiStore';
+import { useRoute, useRouter } from 'vue-router';
+import { withImageAuthToken } from '@/utils/imageUrl';
 
 const PAGE_LIMIT = 25;
 
 const imageManager = useImageManagerStore();
+const syncStore = useSyncStore();
 const authStore = useAuthStore();
 const uiStore = useUiStore();
+const route = useRoute();
+const router = useRouter();
 
 const search = ref('');
 const sort = ref('created_desc');
 const currentCursor = ref(null);
 const cursorStack = ref([]);
 const selectedSet = ref(new Set());
+const selectedDbKey = ref(typeof route.query.dbKey === 'string' ? route.query.dbKey : syncStore.personalDbKey);
+
+const availableScopes = computed(() => [...syncStore.databases.values()]
+    .filter((entry) => entry.db)
+    .map((entry) => ({
+        dbKey: entry.dbKey,
+        label: entry.kind === 'space' ? entry.name : 'Personal Documents',
+    })));
 
 const selectedIds = computed(() => [...selectedSet.value]);
 const allSelected = computed(() => {
@@ -196,14 +224,14 @@ function formatBytes(bytes) {
 }
 
 function imagePreviewUrl(url) {
-    if (!authStore.token) return url;
-    const parsed = new URL(url, window.location.origin);
-    parsed.searchParams.set('token', authStore.token);
-    return import.meta.env.PROD ? `${parsed.pathname}${parsed.search}` : parsed.href;
+    return withImageAuthToken(url, authStore.token, {
+        origin: window.location.origin,
+        absolute: !import.meta.env.PROD,
+    });
 }
 
 async function loadPage(cursor = null) {
-    await imageManager.fetchImages({
+    await imageManager.fetchImages(selectedDbKey.value, {
         limit: PAGE_LIMIT,
         cursor,
         search: search.value.trim(),
@@ -221,7 +249,7 @@ async function applyFilters() {
     currentCursor.value = null;
     await Promise.all([
         loadPage(null),
-        imageManager.fetchStats(),
+        imageManager.fetchStats(selectedDbKey.value),
     ]);
 }
 
@@ -278,7 +306,7 @@ function summarizeUsage(usageMap) {
 async function collectUsage(imageIds) {
     const usageMap = {};
     for (const imageId of imageIds) {
-        usageMap[imageId] = await imageManager.fetchImageUsage(imageId);
+        usageMap[imageId] = await imageManager.fetchImageUsage(selectedDbKey.value, imageId);
     }
     return usageMap;
 }
@@ -290,18 +318,18 @@ async function refreshAfterDelete(deletedIds) {
 
     await Promise.all([
         loadPage(currentCursor.value),
-        imageManager.fetchStats(),
+        imageManager.fetchStats(selectedDbKey.value),
     ]);
 }
 
 async function handleSingleDelete(image) {
-    const usage = await imageManager.fetchImageUsage(image.id);
+    const usage = await imageManager.fetchImageUsage(selectedDbKey.value, image.id);
     const warning = summarizeUsage({ [image.id]: usage });
     const confirmed = window.confirm(`Delete image "${image.filename}"?\n\n${warning}`);
     if (!confirmed) return;
 
     try {
-        await imageManager.deleteImage(image.id, usage.count > 0);
+        await imageManager.deleteImage(selectedDbKey.value, image.id, usage.count > 0);
         uiStore.addToast('Image deleted.', 'success');
         await refreshAfterDelete([image.id]);
     } catch (err) {
@@ -320,7 +348,7 @@ async function handleBulkDelete() {
 
     try {
         const force = Object.values(usageMap).some((usage) => usage.count > 0);
-        const response = await imageManager.bulkDelete(ids, force);
+        const response = await imageManager.bulkDelete(selectedDbKey.value, ids, force);
         const results = response?.results || [];
         const deletedIds = results.filter((result) => result.deleted).map((result) => result.id);
         const failed = results.filter((result) => !result.deleted).length;
@@ -338,7 +366,21 @@ async function handleBulkDelete() {
     }
 }
 
+async function handleScopeChange() {
+    selectedSet.value = new Set();
+    cursorStack.value = [];
+    currentCursor.value = null;
+    const query = { ...route.query };
+    if (selectedDbKey.value === syncStore.personalDbKey) delete query.dbKey;
+    else query.dbKey = selectedDbKey.value;
+    await router.replace({ query });
+    await applyFilters();
+}
+
 onMounted(async () => {
+    if (!availableScopes.value.some((scope) => scope.dbKey === selectedDbKey.value)) {
+        selectedDbKey.value = syncStore.personalDbKey;
+    }
     await applyFilters();
 });
 </script>

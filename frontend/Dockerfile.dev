@@ -3,13 +3,16 @@ FROM node:24-alpine
 
 WORKDIR /app
 
-# We copy package.json first to leverage Docker layer caching
-COPY package*.json ./
+# Build context is the repository root (see docker-compose.dev.yml). The shared
+# content-merge package is linked in via the `file:../shared` dependency.
+COPY frontend/package.json frontend/package-lock.json ./
+COPY shared/package.json shared/package-lock.json /shared/
+COPY shared/contentMerge.js /shared/
 
-RUN npm install
+RUN cd /shared && npm ci --omit=dev
+RUN npm ci
 
-# This line is not needed as the volume will mount the source code
-# COPY . .
+# The dev compose file bind-mounts the frontend source over /app.
 
 EXPOSE 5173
 # The command is specified in docker-compose.dev.yml

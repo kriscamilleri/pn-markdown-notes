@@ -19,8 +19,10 @@ After success, verify the exact archive reported by the command:
 ```bash
 cd ~/backups/panino
 sha256sum -c <archive>.sha256
-tar -tzf <archive> | awk '/^[^/]+\.db$/ { count++ } END { print count + 0 }'
+tar -tzf <archive> | awk '/^data\/(spaces\/)?[^/]+\.db$/ { count++ } END { print count + 0 }'
+tar -tzf <archive> | awk '$0 == "panino-backup-manifest.json" { found = 1 } END { exit !found }'
 ```
 
-Report the archive path, database count, checksum result, and any failure. Do not extract over
-production data. See `scripts/production-database-backup/README.md` for details.
+Report the archive path, database count, manifest result, checksum result, and any failure. Do
+not extract over production data. For a restore, use the staged validator and maintenance-window
+procedure in `scripts/production-database-backup/README.md` and `docs/runbooks/deployment.md`.

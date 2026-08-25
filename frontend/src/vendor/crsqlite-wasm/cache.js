@@ -21,4 +21,3 @@ export function computeCacheKey(sql, mode, bind) {
     }
     return lower;
 }
-//# sourceMappingURL=cache.js.map

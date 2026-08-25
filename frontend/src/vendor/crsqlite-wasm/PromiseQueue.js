@@ -82,4 +82,3 @@ export default class PromiseQueue {
         return res;
     }
 }
-//# sourceMappingURL=PromiseQueue.js.map

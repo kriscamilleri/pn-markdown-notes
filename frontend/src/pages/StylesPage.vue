@@ -1,6 +1,7 @@
 <template>
   <StyleCustomizer :config="markdownStylesConfig">
     <div class="h-full overflow-y-auto p-8">
+      <!-- `previewHtmlContent` is sanitized with DOMPurify below. -->
       <div
         id="preview-content"
         v-html="previewHtmlContent"
@@ -15,6 +16,7 @@ import { computed } from 'vue';
 import { useDocStore } from '@/store/docStore';
 import { useMarkdownStore } from '@/store/markdownStore';
 import StyleCustomizer from '@/components/StyleCustomizer.vue';
+import DOMPurify from 'dompurify';
 
 const docStore = useDocStore();
 const markdownStore = useMarkdownStore();
@@ -111,6 +113,6 @@ const markdownStylesConfig = {
 
 const previewHtmlContent = computed(() => {
   const md = markdownStylesConfig.getMarkdownIt();
-  return md.render(markdownStylesConfig.sampleMarkdown);
+  return DOMPurify.sanitize(md.render(markdownStylesConfig.sampleMarkdown));
 });
 </script>

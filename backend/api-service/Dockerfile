@@ -46,20 +46,30 @@ RUN apt-get update \
     unzip \
   && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
+WORKDIR /app/backend/api-service
 
 ENV PYTHON=/usr/bin/python3
-ENV CRSQLITE_EXT_PATH=/app/native/crsqlite.so
+ENV CRSQLITE_EXT_PATH=/app/backend/api-service/native/crsqlite.so
 
-COPY package*.json .npmrc ./
+# Build context is the repository root (see docker-compose.yml), so paths are
+# repo-relative. Preserve that layout in the image so npm can validate the
+# `file:../../shared` dependency against the committed lockfile.
+COPY backend/api-service/package.json backend/api-service/package-lock.json backend/api-service/.npmrc ./
+COPY shared/package.json shared/package-lock.json /app/shared/
+COPY shared/contentMerge.js /app/shared/
+
+# Install the shared package's runtime dependency first so the app's `file:`
+# link resolves node-diff3 from /app/shared/node_modules.
+RUN cd /app/shared && npm ci --omit=dev
 
 # .npmrc disables lifecycle scripts so better-sqlite3 is rebuilt and
 # Puppeteer's Chrome is fetched explicitly in a deterministic order.
 # CR-SQLite ships as a vendored prebuilt loadable extension.
-RUN if [ -f package-lock.json ]; then npm ci --omit=dev; else npm install --omit=dev; fi \
+RUN npm ci --omit=dev \
   && npm run native:setup
 
-COPY . .
+COPY shared/ /app/shared/
+COPY backend/api-service/ ./
 
 EXPOSE 8000
 CMD ["npm", "start"]

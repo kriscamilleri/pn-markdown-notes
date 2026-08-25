@@ -7,6 +7,17 @@
             :data-testid="`tree-item-context-menu-${item.id}`"
         >
             <button
+                v-if="isSpace"
+                @click="handleManageSpace"
+                class="flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left text-sm text-gray-700 transition-colors hover:bg-gray-100"
+                :data-testid="`tree-item-context-menu-manage-${item.id}`"
+            >
+                <Settings class="h-4 w-4" />
+                <span>Manage space</span>
+            </button>
+
+            <button
+                v-if="!isSpace"
                 @click="handleRename"
                 class="flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left text-sm text-gray-700 transition-colors hover:bg-gray-100"
                 :data-testid="`tree-item-context-menu-rename-${item.id}`"
@@ -15,9 +26,10 @@
                 <span>Rename</span>
             </button>
 
-            <div class="my-1 border-t border-gray-200" />
+            <div v-if="!isSpace" class="my-1 border-t border-gray-200" />
 
             <button
+                v-if="!isSpace"
                 @click="handleDuplicate"
                 class="flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left text-sm text-gray-700 transition-colors hover:bg-gray-100"
                 :data-testid="`tree-item-context-menu-duplicate-${item.id}`"
@@ -27,6 +39,7 @@
             </button>
 
             <button
+                v-if="!isSpace"
                 @click="handleDelete"
                 class="flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left text-sm text-red-600 transition-colors hover:bg-red-50"
                 :data-testid="`tree-item-context-menu-delete-${item.id}`"
@@ -65,7 +78,7 @@
                 'bg-gray-600 text-white': isParentOfSelectedFile,
                 'hover:bg-gray-100': !isSelectedFolder && !isParentOfSelectedFile
             }"
-            draggable="true"
+            :draggable="!isSpace"
             @dragstart="handleDragStart"
             @dragover.prevent.stop
             @drop.prevent.stop="handleDrop"
@@ -92,8 +105,17 @@
                 class="font-semibold flex-grow truncate"
                 :data-testid="`tree-item-folder-name-${item.id}`"
             >
-                <Folder class="inline-block w-4 h-4 mr-1" />{{ item.name }}
+                <Users v-if="isSpace" class="inline-block w-4 h-4 mr-1" />
+                <Folder v-else class="inline-block w-4 h-4 mr-1" />{{ item.name }}
             </span>
+
+            <AvatarStack
+                v-if="isSpace && item.members?.length"
+                :users="item.members"
+                :max="3"
+                size="xs"
+                class="mr-1"
+            />
 
             <button
                 v-if="!isFiltered"
@@ -110,7 +132,19 @@
         </div>
 
         <div
-            v-else
+            v-if="isSpace && item.status && item.status !== 'ready'"
+            class="ml-7 mr-1 rounded-md bg-amber-50 px-2 py-2 text-xs text-amber-800"
+            :data-testid="`space-recovery-${item.dbKey}`"
+        >
+            <p>{{ item.error || 'This space is not ready on this device.' }}</p>
+            <div class="mt-1 flex gap-2">
+                <button class="font-semibold underline" @click="retrySpace">Retry</button>
+                <button class="font-semibold underline" @click="removeSpace">Remove locally</button>
+            </div>
+        </div>
+
+        <div
+            v-if="!isFolder"
             class="flex items-center space-x-2 cursor-pointer group rounded-md pl-1 hover:bg-gray-100"
             :class="{
                 'ml-6': isFiltered,
@@ -129,6 +163,14 @@
                 class="flex-grow truncate"
                 :data-testid="`tree-item-file-name-${item.id}`"
             >{{ item.name }}</span>
+
+            <span
+                v-if="hasConflict"
+                class="h-2 w-2 flex-shrink-0 rounded-full bg-amber-500"
+                :title="'Unresolved changes'"
+                :aria-label="'Unresolved changes'"
+                :data-testid="`tree-item-conflict-${item.id}`"
+            ></span>
 
             <button
                 v-if="!isFiltered"
@@ -151,7 +193,7 @@
             <template v-if="isFiltered">
                 <li
                     v-for="file in matchingFiles"
-                    :key="file.id"
+                    :key="file.treeKey || file.id"
                     class="mb-1"
                 >
                     <TreeItem
@@ -163,7 +205,7 @@
                     <div class="text-xs text-gray-500 pl-2">(Documents inside matching folder)</div>
                     <TreeItem
                         v-for="child in children.filter(c => c.type === 'file')"
-                        :key="child.id"
+                        :key="child.treeKey || child.id"
                         :item="child"
                         :is-filtered="true"
                     />
@@ -172,7 +214,7 @@
             <template v-else>
                 <li
                     v-for="child in children"
-                    :key="child.id"
+                    :key="child.treeKey || child.id"
                     class="mb-1"
                 >
                     <TreeItem
@@ -220,11 +262,15 @@ import { provide, computed, ref, onMounted, onUnmounted, watch, inject } from 'v
 import { useRouter } from 'vue-router'
 import { useDocStore } from '@/store/docStore'
 import { useStructureStore } from '@/store/structureStore'
+import { useConflictStore } from '@/store/conflictStore'
+import { useSyncStore } from '@/store/syncStore'
+import { useUiStore } from '@/store/uiStore'
 import PromptModal from '@/components/PromptModal.vue'
+import AvatarStack from '@/components/AvatarStack.vue'
 
 import {
     Trash2, FilePlus, FolderPlus, MoreHorizontal,
-    ChevronRight, ChevronDown, Folder, File, Edit, Copy
+    ChevronRight, ChevronDown, Folder, File, Edit, Copy, Users, Settings
 } from 'lucide-vue-next'
 
 const props = defineProps({
@@ -235,20 +281,24 @@ const props = defineProps({
 
 const docStore = useDocStore()
 const structureStore = useStructureStore()
+const conflictStore = useConflictStore()
+const syncStore = useSyncStore()
+const ui = useUiStore()
 const router = useRouter()
 
 const children = ref([]);
-const isFolder = computed(() => props.item.type === 'folder')
+const isSpace = computed(() => props.item.type === 'space')
+const isFolder = computed(() => props.item.type === 'folder' || isSpace.value)
 const localFolderState = ref(props.isFiltered)
 
 const isOpen = computed(() =>
     isFolder.value
-        ? (props.isFiltered ? localFolderState.value : docStore.openFolders.has(props.item.id))
+        ? (props.isFiltered ? localFolderState.value : docStore.isFolderOpen(props.item.id, props.item.dbKey))
         : false)
 
 async function fetchChildren() {
     if (isFolder.value) {
-        children.value = await docStore.getChildren(props.item.id);
+        children.value = await docStore.getChildren(props.item.id, props.item.dbKey);
     }
 }
 
@@ -275,6 +325,9 @@ const isParentOfSelectedFile = computed(() => {
 const isSelectedFolder = computed(() =>
     isFolder.value && docStore.selectedFolderId === props.item.id)
 
+const hasConflict = computed(() =>
+    !isFolder.value && conflictStore.hasConflict(props.item.id, props.item.dbKey))
+
 const shouldShowContextButton = computed(() =>
     isSelectedFolder.value || isParentOfSelectedFile.value || isSelectedFile.value)
 
@@ -283,6 +336,7 @@ const shouldShowContextButton = computed(() =>
    ▸ DRAG-AND-DROP
 ────────────────────────────── */
 const refreshParent = inject('refreshParent', () => { });
+const requestDatabaseTransfer = inject('requestDatabaseTransfer', () => { });
 
 function handleDragStart(e) {
     e.dataTransfer.effectAllowed = 'move'
@@ -294,7 +348,23 @@ async function handleDrop(e) {
     if (!droppedItem || !droppedItem.id) return
     if (droppedItem.id === props.item.id) return
 
-    const { oldParentId } = await structureStore.moveItem(droppedItem.id, props.item.id, droppedItem.type);
+    let oldParentId
+    try {
+        const result = await structureStore.moveItem(
+            droppedItem.id,
+            props.item.id,
+            droppedItem.type,
+            props.item.dbKey,
+        )
+        if (result?.requiresConfirmation) {
+            requestDatabaseTransfer(result)
+            return
+        }
+        oldParentId = result?.oldParentId
+    } catch (error) {
+        ui.addToast(error?.message || 'Failed to move Document.', 'warning')
+        return
+    }
 
     await fetchChildren(); // Refresh this folder (the destination)
 
@@ -313,16 +383,18 @@ function toggleLocalFolderState() {
     if (props.isFiltered) {
         localFolderState.value = !localFolderState.value;
     } else {
-        docStore.toggleFolder(props.item.id);
+        docStore.toggleFolder(props.item.id, props.item.dbKey);
     }
 }
 
 function handleFolderClick() {
-    router.push({ name: 'folder', params: { folderId: props.item.id } })
+    docStore.selectFolder(props.item.id, props.item.dbKey)
+    router.push({ name: 'folder', params: { folderId: props.item.id }, query: { dbKey: props.item.dbKey } })
 }
 
 function handleFileClick(id) {
-    router.push({ name: 'doc', params: { fileId: id } })
+    docStore.selectFile(id, props.item.dbKey)
+    router.push({ name: 'doc', params: { fileId: id }, query: { dbKey: props.item.dbKey } })
 }
 
 /* ──────────────────────────────
@@ -340,9 +412,14 @@ function showMenu(event) {
     event.preventDefault()
 }
 
+function handleManageSpace() {
+    showContextMenu.value = false
+    router.push({ name: 'spaces', query: { space: props.item.id } })
+}
+
 async function handleDuplicate() {
     if (props.item.type === 'file') {
-        const result = await docStore.duplicateFile(props.item.id)
+        const result = await docStore.duplicateFile(props.item.id, props.item.dbKey)
         if (result) {
             refreshParent()
         }
@@ -357,7 +434,7 @@ async function handleDelete() {
         return
     }
     if (confirm(`Delete "${props.item.name}"? This cannot be undone.`)) {
-        await docStore.deleteItem(props.item.id, props.item.type)
+        await docStore.deleteItem(props.item.id, props.item.type, props.item.dbKey)
         refreshParent(); // Tell parent to refresh its list
     }
     showContextMenu.value = false
@@ -378,8 +455,8 @@ function openCreate(type) {
 async function confirmCreate() {
     if (!newItemName.value.trim()) return
     const action = createType.value === 'Document'
-        ? docStore.createFile(newItemName.value, props.item.id)
-        : docStore.createFolder(newItemName.value, props.item.id)
+        ? docStore.createFile(props.item.dbKey, newItemName.value, props.item.id)
+        : docStore.createFolder(props.item.dbKey, newItemName.value, props.item.id)
 
     await action;
     await fetchChildren(); // Refresh this item's children
@@ -411,7 +488,7 @@ function handleRename() {
 async function confirmRename() {
     const trimmed = renameItemName.value.trim()
     if (trimmed && trimmed !== props.item.name) {
-        await docStore.renameItem(props.item.id, trimmed, props.item.type)
+        await docStore.renameItem(props.item.id, trimmed, props.item.type, props.item.dbKey)
         refreshParent();
     }
     cancelRename()
@@ -426,6 +503,16 @@ function handleClickOutside() {
     if (showContextMenu.value) {
         showContextMenu.value = false
     }
+}
+
+async function retrySpace() {
+    await syncStore.retryBootstrap(props.item.dbKey)
+    await docStore.loadRootItems()
+}
+
+async function removeSpace() {
+    await syncStore.removeDatabase(props.item.dbKey)
+    await docStore.loadRootItems()
 }
 
 onMounted(() => document.addEventListener('click', handleClickOutside, true))

@@ -51,4 +51,3 @@ export default async function initWasm(locateWasm) {
     api = new SQLite3(sqlite3);
     return api;
 }
-//# sourceMappingURL=index.js.map

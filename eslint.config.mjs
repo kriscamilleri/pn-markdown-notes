@@ -69,8 +69,8 @@ export default [
       // Editor.vue, Navbar.vue, Documents.vue and Preview.vue predate this config and are
       // referenced by name throughout the app. Renaming them is a refactor, not a lint fix.
       "vue/multi-word-component-names": "off",
-      // v-html is used in exactly three places, each fed by DOMPurify-sanitized output.
-      // Kept as a warning deliberately: it should stay visible in review, not be silenced.
+      // Raw HTML is prohibited by default. The two sanitized preview surfaces have narrow,
+      // file-specific exemptions below.
       "vue/no-v-html": "warn",
     },
   },
@@ -84,6 +84,17 @@ export default [
       globals: { ...globals.browser },
     },
     rules: vueStylisticOff,
+  },
+
+  {
+    files: [
+      "frontend/src/components/Preview.vue",
+      "frontend/src/pages/StylesPage.vue",
+    ],
+    rules: {
+      // Both surfaces sanitize their MarkdownIt output with DOMPurify before rendering.
+      "vue/no-v-html": "off",
+    },
   },
 
   // Build/tooling config files run under Node even inside the frontend tree.

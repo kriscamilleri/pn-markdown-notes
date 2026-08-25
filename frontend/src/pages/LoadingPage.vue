@@ -29,13 +29,14 @@
 
 <script setup>
 import { ref, onMounted } from 'vue';
-import { useRouter } from 'vue-router';
+import { useRoute, useRouter } from 'vue-router';
 import { useSyncStore } from '@/store/syncStore';
 import { useDocStore } from '@/store/docStore';
 
 const syncStore = useSyncStore();
 const docStore = useDocStore();
 const router = useRouter();
+const route = useRoute();
 
 const statusMessage = ref('Initializing local database...');
 const initializationFailed = ref(false);
@@ -56,7 +57,10 @@ async function initialize() {
     await docStore.loadInitialData();
 
     statusMessage.value = 'Setup complete!';
-    router.replace('/');
+    const redirect = typeof route.query.redirect === 'string' && route.query.redirect.startsWith('/')
+      ? route.query.redirect
+      : '/';
+    router.replace(redirect);
   } catch (error) {
     console.error('Critical initialization failed:', error);
     initializationFailed.value = true;

@@ -45,27 +45,33 @@ RUN apt-get update -o Acquire::Retries=5 \
 		unzip \
 	&& rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
+WORKDIR /app/backend/api-service
 
 ENV PYTHON=/usr/bin/python3
-ENV CRSQLITE_EXT_PATH=/app/native/crsqlite.so
+ENV CRSQLITE_EXT_PATH=/app/backend/api-service/native/crsqlite.so
 # Headless Shell supports the PDF test suite; avoid downloading full Chrome as well.
 ENV PUPPETEER_CHROME_SKIP_DOWNLOAD=true
 
-# Copy package files
-COPY package*.json .npmrc ./
+# Build context is the repository root (see scripts/test-backend.sh). Preserve
+# the repository layout so npm can validate the `file:../../shared` lock target.
+COPY backend/api-service/package.json backend/api-service/package-lock.json backend/api-service/.npmrc ./
+COPY shared/package.json shared/package-lock.json /app/shared/
+COPY shared/contentMerge.js /app/shared/
+RUN cd /app/shared && npm ci --omit=dev
 
 # .npmrc disables lifecycle scripts so better-sqlite3 is rebuilt and
 # Puppeteer's browser is fetched explicitly in a deterministic order.
 # CR-SQLite ships as a vendored prebuilt loadable extension.
-RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi \
+RUN npm ci \
 	&& npm run native:setup \
 	&& ln -s "$(find /root/.cache/puppeteer/chrome-headless-shell -type f -name chrome-headless-shell -print -quit)" /usr/local/bin/chrome-headless-shell
 
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/local/bin/chrome-headless-shell
 
 # Copy application code
-COPY . .
+COPY shared/ /app/shared/
+COPY backend/api-service/ ./
+COPY docker-compose.yml /app/docker-compose.yml
 
 # Set test environment
 ENV NODE_ENV=test

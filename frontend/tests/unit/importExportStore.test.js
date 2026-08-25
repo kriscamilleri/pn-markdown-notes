@@ -80,31 +80,33 @@ function createMockDb() {
 }
 
 function createMockSyncStore(db) {
+    const execute = vi.fn(async (sql, params = []) => {
+        if (sql.includes('FROM folders WHERE parent_id IS ? AND name = ?')) {
+            const parentId = params[0] ?? null;
+            const name = params[1];
+            return db.tables.folders.filter(
+                (folder) => folder.parent_id === parentId && folder.name === name
+            );
+        }
+
+        if (sql.includes('FROM notes WHERE folder_id IS ? AND title = ?')) {
+            const folderId = params[0] ?? null;
+            const title = params[1];
+            return db.tables.notes.filter(
+                (note) => note.folder_id === folderId && note.title === title
+            );
+        }
+
+        return [];
+    });
+    const repository = { execute, exec: db.exec };
     return {
         isInitialized: true,
         isOnline: true,
         syncEnabled: true,
         db: { value: db },
         sync: vi.fn(async () => {}),
-        execute: vi.fn(async (sql, params = []) => {
-            if (sql.includes('FROM folders WHERE parent_id IS ? AND name = ?')) {
-                const parentId = params[0] ?? null;
-                const name = params[1];
-                return db.tables.folders.filter(
-                    (folder) => folder.parent_id === parentId && folder.name === name
-                );
-            }
-
-            if (sql.includes('FROM notes WHERE folder_id IS ? AND title = ?')) {
-                const folderId = params[0] ?? null;
-                const title = params[1];
-                return db.tables.notes.filter(
-                    (note) => note.folder_id === folderId && note.title === title
-                );
-            }
-
-            return [];
-        }),
+        personalRepository: vi.fn(() => repository),
     };
 }
 

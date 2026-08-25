@@ -54,13 +54,14 @@ describe("TemplatePickerModal – title pattern resolution", () => {
     expect(body).toMatch(/if\s*\(resolved\)\s*noteTitle\s*=\s*resolved/);
   });
 
-  it("passes the resolved title to createFile and the resolved content to updateFileContent", () => {
+  it("passes the database scope and resolved title to createFile, then writes content transactionally", () => {
     const body = functionBody("createNoteFromTemplate");
-    expect(body).toMatch(/createFile\(\s*noteTitle\s*,\s*folderId\s*\)/);
+    expect(body).toMatch(/createFile\(\s*props\.databaseKey\s*,\s*noteTitle\s*,\s*folderId\s*\)/);
     expect(body).toMatch(
       /resolveTemplateVariables\(\s*tpl\.content\s*,\s*inputValues\s*\)/,
     );
-    expect(body).toMatch(/updateFileContent\(\s*result\.id\s*,\s*resolvedContent/);
+    expect(body).toMatch(/repository\(props\.databaseKey\)\.transaction/);
+    expect(body).toMatch(/UPDATE notes SET content = \?, updated_at = \? WHERE id = \?/);
   });
 
   it("scans both content and title pattern for input labels", () => {

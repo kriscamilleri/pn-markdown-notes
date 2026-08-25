@@ -27,8 +27,10 @@ describe('editorStore', () => {
     it('does not throw when image library insert is unavailable', () => {
         const store = useEditorStore();
         store.setEditorRef({});
+        const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
         expect(() => store.insertImageFromLibrary([{ id: 'img-1' }])).not.toThrow();
+        expect(warning).toHaveBeenCalledWith('Editor not available for insertImagesFromLibrary');
     });
 
     it('forwards insertText to exposed editor method', () => {
@@ -44,7 +46,9 @@ describe('editorStore', () => {
     it('does not throw when insertText is unavailable', () => {
         const store = useEditorStore();
         store.setEditorRef({});
+        const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
         expect(() => store.insertText('dictated words')).not.toThrow();
+        expect(warning).toHaveBeenCalledWith('Editor not available for insertText');
     });
 });
