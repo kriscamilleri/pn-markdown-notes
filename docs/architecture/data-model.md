@@ -43,9 +43,12 @@ body.
 `space_invites`, `space_user_versions`, `space_transfers`, and its own ordered
 `spaces_schema_migrations` table.
 Schema v2 adds a non-secret UUID management id and revocation timestamp to invitations; raw
-256-bit invite tokens appear only in email, while SHA-256 hashes remain at rest. Invites are
-normalized to the captured email, expire after seven days, create editors only, and are
-single-use.
+256-bit invite tokens appear only in email or the owner's immediate create/resend response, while
+SHA-256 hashes remain at rest. Invites are normalized to the captured email, expire after seven
+days, create editors only, and are single-use. `GET /space-invitations` lists only active,
+unexpired invitations matching the authenticated account email and never returns a token.
+`POST /space-invitations/:inviteId/accept` re-checks that email and invitation state before adding
+membership; the token-based email landing route remains supported.
 
 Schema v3 adds server-owned cross-database transfer checkpoints. A transfer records the actor,
 source/destination database keys and Document ids, source content hash/timestamp, stable image-id

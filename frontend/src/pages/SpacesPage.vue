@@ -26,6 +26,62 @@
         </form>
       </section>
 
+      <section class="border-b border-gray-200 py-6" data-testid="pending-space-invitations">
+        <h2 class="pn-title-modal">Invitations to you</h2>
+        <p class="pn-body mt-1">Accept an invitation to add its space to this device.</p>
+        <div v-if="spacesStore.pendingInvitationsLoading" class="pn-panel-muted mt-4 p-4 pn-body">
+          Loading invitations…
+        </div>
+        <div v-else-if="spacesStore.pendingInvitationsError" class="pn-alert pn-alert-error mt-4">
+          {{ spacesStore.pendingInvitationsError }}
+        </div>
+        <div v-else-if="!spacesStore.pendingInvitations.length" class="pn-panel-muted mt-4 p-4 pn-body">
+          No pending invitations.
+        </div>
+        <div v-else class="mt-4">
+          <div class="space-y-3 sm:hidden">
+            <article
+              v-for="invitation in spacesStore.pendingInvitations"
+              :key="invitation.id"
+              class="rounded-lg border border-gray-200 p-4"
+            >
+              <h3 class="text-sm font-semibold text-gray-900">{{ invitation.spaceName }}</h3>
+              <p class="pn-meta mt-1 capitalize">
+                {{ invitation.role }} · Expires {{ formatDate(invitation.expiresAt) }}
+              </p>
+              <BaseButton
+                class="mt-3 w-full"
+                variant="primary"
+                size="md"
+                :disabled="pending"
+                :data-testid="`accept-space-invitation-${invitation.id}`"
+                @click="acceptPendingInvitation(invitation)"
+              >Accept invitation</BaseButton>
+            </article>
+          </div>
+          <div class="pn-table-wrap hidden sm:block">
+            <table class="pn-table">
+            <thead><tr><th>Space</th><th>Role</th><th>Expires</th><th>Action</th></tr></thead>
+            <tbody>
+              <tr v-for="invitation in spacesStore.pendingInvitations" :key="invitation.id">
+                <td class="font-medium text-gray-900">{{ invitation.spaceName }}</td>
+                <td class="capitalize">{{ invitation.role }}</td>
+                <td>{{ formatDate(invitation.expiresAt) }}</td>
+                <td>
+                  <BaseButton
+                    variant="primary"
+                    :disabled="pending"
+                    :data-testid="`accept-space-invitation-${invitation.id}-desktop`"
+                    @click="acceptPendingInvitation(invitation)"
+                  >Accept</BaseButton>
+                </td>
+              </tr>
+            </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
       <div class="mt-6 grid gap-6 lg:grid-cols-[minmax(220px,0.8fr)_minmax(0,2fr)]">
         <section>
           <h2 class="pn-title-section mb-3">Your spaces</h2>
@@ -128,6 +184,15 @@
                       <td>{{ invitation.email }}</td>
                       <td>{{ formatDate(invitation.expiresAt) }}</td>
                       <td><div class="flex flex-wrap gap-1">
+                        <BaseButton
+                          v-if="invitationUrlFor(invitation)"
+                          :disabled="pending"
+                          @click="copyInvitationLink(invitation)"
+                        >Copy link</BaseButton>
+                        <BaseButton
+                          :disabled="pending"
+                          @click="copyNewInvitationLink(invitation)"
+                        >Copy new link</BaseButton>
                         <BaseButton :disabled="pending" @click="resend(invitation)">Resend</BaseButton>
                         <BaseButton variant="danger" :disabled="pending" @click="revoke(invitation)">Revoke</BaseButton>
                       </div></td>
@@ -201,6 +266,7 @@ const selectedId = ref(null);
 const newName = ref("");
 const renameName = ref("");
 const inviteEmail = ref("");
+const invitationUrls = ref(new Map());
 const confirmationName = ref("");
 const pending = ref(false);
 const confirm = reactive({ kind: "", member: null });
@@ -225,6 +291,7 @@ const canConfirm = computed(() => (
 watch(() => spacesStore.detail?.space?.name, (name) => { renameName.value = name || ""; });
 
 onMounted(() => {
+  void spacesStore.loadPendingInvitations().catch(() => {});
   const requested = typeof route.query.space === "string" ? route.query.space : "";
   selectedId.value = spacesStore.spaces.some((space) => space.id === requested)
     ? requested
@@ -255,6 +322,15 @@ async function selectSpace(spaceId) {
   await perform(() => spacesStore.loadDetail(spaceId));
 }
 
+async function acceptPendingInvitation(invitation) {
+  const result = await perform(
+    () => spacesStore.acceptPendingInvitation(invitation.id),
+    `Invitation to ${invitation.spaceName} accepted.`,
+  );
+  if (!result?.spaceId) return;
+  await selectSpace(result.spaceId);
+}
+
 async function create() {
   const created = await perform(() => spacesStore.createSpace(newName.value), "Space created.");
   if (!created) return;
@@ -273,6 +349,7 @@ async function invite() {
   );
   if (!result) return;
   inviteEmail.value = "";
+  rememberInvitationUrl(result);
   if (!result.emailSent) uiStore.addToast("The invitation is saved, but email delivery failed. Try Resend.", "warning");
 }
 
@@ -282,7 +359,44 @@ async function revoke(invitation) {
 
 async function resend(invitation) {
   const result = await perform(() => spacesStore.resendInvite(selectedId.value, invitation.id), "A new invitation link was created.");
+  if (result) rememberInvitationUrl(result);
   if (result && !result.emailSent) uiStore.addToast("Email delivery failed. Try Resend again.", "warning");
+}
+
+async function copyNewInvitationLink(invitation) {
+  const result = await perform(
+    () => spacesStore.resendInvite(selectedId.value, invitation.id),
+    "A new invitation link was created.",
+  );
+  if (!result) return;
+  rememberInvitationUrl(result);
+  await copyInvitationUrl(result.invitationUrl);
+  if (!result.emailSent) uiStore.addToast("Email delivery failed. Try Resend again.", "warning");
+}
+
+function rememberInvitationUrl(result) {
+  const invitationId = result?.invitation?.id;
+  if (!invitationId || !result.invitationUrl) return;
+  invitationUrls.value = new Map([[invitationId, result.invitationUrl]]);
+}
+
+function invitationUrlFor(invitation) {
+  return invitationUrls.value.get(invitation.id) || "";
+}
+
+async function copyInvitationLink(invitation) {
+  const invitationUrl = invitationUrlFor(invitation);
+  if (!invitationUrl) return;
+  await copyInvitationUrl(invitationUrl);
+}
+
+async function copyInvitationUrl(invitationUrl) {
+  try {
+    await navigator.clipboard.writeText(invitationUrl);
+    uiStore.addToast("Invitation link copied. Send it only to the invited email address.", "success");
+  } catch {
+    uiStore.addToast("Could not copy the invitation link. Try again or resend the invitation.", "error");
+  }
 }
 
 function confirmAction(kind, member = null) {

@@ -11,6 +11,7 @@ const databaseMocks = vi.hoisted(() => ({
 vi.mock("../../db.js", () => databaseMocks);
 
 import {
+  acceptPendingSpaceInvitation,
   acceptSpaceInvite,
   addEditorMember,
   assertSpacesInvariants,
@@ -22,6 +23,7 @@ import {
   getSpaceDetails,
   isSharedSpacesEnabled,
   leaveSpace,
+  listPendingSpaceInvitations,
   listSpacesForUser,
   renameSpace,
   removeEditorMember,
@@ -633,6 +635,43 @@ describe("Phase 5 lifecycle", () => {
       .toEqual({ name: "Editor", email: null });
     expect(() => acceptSpaceInvite({ actorUserId: EDITOR_ID, token, now }))
       .toThrowError(expect.objectContaining({ code: "SPACE_INVITE_INVALID" }));
+  });
+
+  it("lists invitations for the matching account and accepts one by public id", () => {
+    const space = createSpace(OWNER_ID, "Writers");
+    const now = new Date("2026-08-18T20:00:00.000Z");
+    const created = createSpaceInvite({
+      actorUserId: OWNER_ID,
+      spaceId: space.spaceId,
+      email: "editor@example.test",
+      now,
+      tokenFactory: () => "e".repeat(64),
+    });
+
+    expect(listPendingSpaceInvitations({
+      actorUserId: EDITOR_ID,
+      now: new Date("2026-08-20T20:00:00.000Z"),
+    })).toEqual([{
+      id: created.invite.id,
+      spaceName: "Writers",
+      role: "editor",
+      expiresAt: created.invite.expiresAt,
+      createdAt: created.invite.createdAt,
+    }]);
+    expect(listPendingSpaceInvitations({ actorUserId: OTHER_ID, now })).toEqual([]);
+    expect(() => acceptPendingSpaceInvitation({
+      actorUserId: OTHER_ID,
+      inviteId: created.invite.id,
+      now,
+    })).toThrowError(expect.objectContaining({ code: "SPACE_INVITE_INVALID" }));
+
+    acceptPendingSpaceInvitation({
+      actorUserId: EDITOR_ID,
+      inviteId: created.invite.id,
+      now,
+    });
+    expect(getSpaceMembership(space.spaceId, EDITOR_ID)?.role).toBe("editor");
+    expect(listPendingSpaceInvitations({ actorUserId: EDITOR_ID, now })).toEqual([]);
   });
 
   it("rejects wrong-account and expired invite acceptance without adding membership", () => {

@@ -3,6 +3,7 @@ import request from "supertest";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../mailer.js", () => ({
+  buildSpaceInviteUrl: (token) => `http://localhost:5173/#/spaces/invitations/${token}`,
   sendPasswordResetEmail: vi.fn(),
   sendSpaceInviteEmail: vi.fn().mockResolvedValue(true),
 }));
@@ -112,7 +113,11 @@ describe("shared-space lifecycle routes", () => {
       .expect(201);
     expect(invited.body.invitation.email).toBe(editor.email.toLowerCase());
     expect(invited.body).not.toHaveProperty("token");
+    expect(invited.body.invitationUrl).toMatch(
+      new RegExp(`/spaces/invitations/[a-f0-9]{64}$`),
+    );
     const rawToken = sendSpaceInviteEmail.mock.calls[0][1];
+    expect(invited.body.invitationUrl).toContain(rawToken);
     const stored = getSpacesDb().prepare(
       "SELECT token_hash AS tokenHash FROM space_invites WHERE invite_id = ?",
     ).get(invited.body.invitation.id);
@@ -136,6 +141,47 @@ describe("shared-space lifecycle routes", () => {
       .expect(400, { error: "Invitation is invalid or expired", code: "SPACE_INVITE_INVALID" });
   });
 
+  it("lists and accepts invitations for the signed-in account on Manage Spaces", async () => {
+    const space = await createViaApi("Editorial");
+    const invited = await request(app)
+      .post(`/spaces/${space.id}/invitations`)
+      .set(auth(owner))
+      .send({ email: editor.email })
+      .expect(201);
+
+    await request(app)
+      .get("/space-invitations")
+      .set(auth(outsider))
+      .expect(200, { invitations: [] });
+    const pending = await request(app)
+      .get("/space-invitations")
+      .set(auth(editor))
+      .expect(200);
+    expect(pending.body.invitations).toEqual([
+      expect.objectContaining({
+        id: invited.body.invitation.id,
+        spaceName: "Editorial",
+        role: "editor",
+      }),
+    ]);
+    expect(JSON.stringify(pending.body)).not.toContain(sendSpaceInviteEmail.mock.calls[0][1]);
+
+    await request(app)
+      .post(`/space-invitations/${invited.body.invitation.id}/accept`)
+      .set(auth(outsider))
+      .expect(400, { error: "Invitation is invalid or expired", code: "SPACE_INVITE_INVALID" });
+    const accepted = await request(app)
+      .post(`/space-invitations/${invited.body.invitation.id}/accept`)
+      .set(auth(editor))
+      .expect(200);
+    expect(accepted.body).toMatchObject({ accepted: true, spaceId: space.id });
+    await request(app)
+      .get("/space-invitations")
+      .set(auth(editor))
+      .expect(200, { invitations: [] });
+    await request(app).get(`/spaces/${space.id}`).set(auth(editor)).expect(200);
+  });
+
   it("revokes and resends invitations while invalidating every previous link", async () => {
     const space = await createViaApi();
     const first = await request(app)
@@ -151,6 +197,7 @@ describe("shared-space lifecycle routes", () => {
     const secondToken = sendSpaceInviteEmail.mock.calls.at(-1)[1];
     expect(secondToken).not.toBe(firstToken);
     expect(resent.body.invitation.id).not.toBe(first.body.invitation.id);
+    expect(resent.body.invitationUrl).toContain(secondToken);
 
     await request(app)
       .post("/space-invitations/accept")
@@ -219,4 +266,3 @@ describe("shared-space lifecycle routes", () => {
       .toEqual({ status: "pending_delete" });
   });
 });
-

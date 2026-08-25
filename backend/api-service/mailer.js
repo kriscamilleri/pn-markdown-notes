@@ -3,6 +3,11 @@ import nodemailer from 'nodemailer';
 
 const { SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_FROM, FRONTEND_URL } = process.env;
 
+export function buildSpaceInviteUrl(token) {
+    const baseUrl = (FRONTEND_URL || 'http://localhost:5173').replace(/\/$/, '');
+    return `${baseUrl}/#/spaces/invitations/${token}`;
+}
+
 const transporter = nodemailer.createTransport({
     host: SMTP_HOST,
     port: parseInt(SMTP_PORT || '587', 10),
@@ -41,7 +46,7 @@ function escapeHtml(value) {
 }
 
 export async function sendSpaceInviteEmail(to, token, spaceName) {
-    const inviteLink = `${FRONTEND_URL || 'http://localhost:5173'}/#/spaces/invitations/${token}`;
+    const inviteLink = buildSpaceInviteUrl(token);
     const safeLink = escapeHtml(inviteLink);
     const safeSpaceName = escapeHtml(spaceName);
     const mailOptions = {

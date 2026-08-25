@@ -8,7 +8,7 @@ import {
   getDb,
   getSpacesDb,
 } from "./db.js";
-import { sendSpaceInviteEmail } from "./mailer.js";
+import { buildSpaceInviteUrl, sendSpaceInviteEmail } from "./mailer.js";
 import { deleteSpaceUploads } from "./spaceStorage.js";
 
 const ALLOWED_ROLES = new Set(["owner", "editor"]);
@@ -889,22 +889,59 @@ export function resendSpaceInvite({ actorUserId, spaceId, inviteId, now = new Da
   });
 }
 
-export function acceptSpaceInvite({ actorUserId, token, now = new Date() }) {
+/**
+ * Lists active, unexpired invitations addressed to the authenticated account.
+ * Raw invitation tokens are never returned by this discovery endpoint.
+ */
+export function listPendingSpaceInvitations({ actorUserId, now = new Date() }) {
   requireEnabled();
   requireUuid(actorUserId, "actorUserId");
   const actor = requireUser(actorUserId);
-  if (typeof token !== "string" || token.length < 32 || token.length > 256) {
-    throw new SpaceRepositoryError("SPACE_INVITE_INVALID", "Invitation is invalid or expired");
-  }
+  const actorEmail = normalizeInviteEmail(
+    getAuthDb().prepare("SELECT email FROM users WHERE id = ?").get(actor.id)?.email,
+  );
+  if (!actorEmail) return [];
+
+  return getSpacesDb().prepare(
+    `SELECT i.invite_id AS id,
+            s.name AS spaceName,
+            i.role,
+            i.expires_at AS expiresAt,
+            i.created_at AS createdAt
+       FROM space_invites i
+       JOIN spaces s ON s.id = i.space_id
+      WHERE i.email = ?
+        AND i.used_at IS NULL
+        AND i.revoked_at IS NULL
+        AND i.expires_at > ?
+        AND s.status = 'active'
+        AND NOT EXISTS (
+          SELECT 1
+            FROM space_members m
+           WHERE m.space_id = i.space_id AND m.user_id = ?
+        )
+      ORDER BY i.created_at DESC, i.invite_id`,
+  ).all(actorEmail, now.toISOString(), actorUserId);
+}
+
+function acceptSpaceInviteSelection({
+  actorUserId,
+  tokenHash = null,
+  inviteId = null,
+  now = new Date(),
+}) {
+  requireEnabled();
+  requireUuid(actorUserId, "actorUserId");
+  const actor = requireUser(actorUserId);
   const db = getSpacesDb();
   const acceptedAt = now.toISOString();
-  const tokenHash = hashInviteToken(token);
 
   const candidate = db.prepare(
     `SELECT i.space_id AS spaceId, i.email, i.expires_at AS expiresAt, s.status
        FROM space_invites i JOIN spaces s ON s.id = i.space_id
-      WHERE i.token_hash = ? AND i.used_at IS NULL AND i.revoked_at IS NULL`,
-  ).get(tokenHash);
+      WHERE ((? IS NOT NULL AND i.token_hash = ?) OR (? IS NOT NULL AND i.invite_id = ?))
+        AND i.used_at IS NULL AND i.revoked_at IS NULL`,
+  ).get(tokenHash, tokenHash, inviteId, inviteId);
   const actorEmail = getAuthDb().prepare("SELECT email FROM users WHERE id = ?").get(actor.id)?.email;
   if (
     !candidate ||
@@ -927,8 +964,9 @@ export function acceptSpaceInvite({ actorUserId, token, now = new Date() }) {
               s.status
          FROM space_invites i
          JOIN spaces s ON s.id = i.space_id
-        WHERE i.token_hash = ? AND i.used_at IS NULL AND i.revoked_at IS NULL`,
-    ).get(tokenHash);
+        WHERE ((? IS NOT NULL AND i.token_hash = ?) OR (? IS NOT NULL AND i.invite_id = ?))
+          AND i.used_at IS NULL AND i.revoked_at IS NULL`,
+    ).get(tokenHash, tokenHash, inviteId, inviteId);
     const authEmail = getAuthDb().prepare("SELECT email FROM users WHERE id = ?").get(actor.id)?.email;
     if (
       !invite ||
@@ -963,10 +1001,10 @@ export function acceptSpaceInvite({ actorUserId, token, now = new Date() }) {
       `INSERT INTO space_members (space_id, user_id, role, invited_by, created_at)
        SELECT space_id, ?, 'editor', s.owner_user_id, ?
          FROM space_invites i JOIN spaces s ON s.id = i.space_id
-        WHERE i.token_hash = ?`,
-    ).run(actorUserId, acceptedAt, tokenHash);
-    db.prepare("UPDATE space_invites SET used_at = ? WHERE token_hash = ?")
-      .run(acceptedAt, tokenHash);
+        WHERE i.invite_id = ?`,
+    ).run(actorUserId, acceptedAt, invite.inviteId);
+    db.prepare("UPDATE space_invites SET used_at = ? WHERE invite_id = ?")
+      .run(acceptedAt, invite.inviteId);
     const userIds = memberUserIds(db, invite.spaceId);
     bumpUsers(db, userIds);
     assertSpacesInvariants(db);
@@ -977,6 +1015,32 @@ export function acceptSpaceInvite({ actorUserId, token, now = new Date() }) {
     };
   })();
   return result;
+}
+
+export function acceptSpaceInvite({ actorUserId, token, now = new Date() }) {
+  requireEnabled();
+  requireUuid(actorUserId, "actorUserId");
+  requireUser(actorUserId);
+  if (typeof token !== "string" || token.length < 32 || token.length > 256) {
+    throw new SpaceRepositoryError("SPACE_INVITE_INVALID", "Invitation is invalid or expired");
+  }
+  return acceptSpaceInviteSelection({
+    actorUserId,
+    tokenHash: hashInviteToken(token),
+    now,
+  });
+}
+
+/**
+ * Accepts a discovered invitation by its public id after re-checking that the
+ * authenticated account still owns the invited email address.
+ */
+export function acceptPendingSpaceInvitation({ actorUserId, inviteId, now = new Date() }) {
+  requireEnabled();
+  requireUuid(actorUserId, "actorUserId");
+  requireUser(actorUserId);
+  requireUuid(inviteId, "inviteId");
+  return acceptSpaceInviteSelection({ actorUserId, inviteId, now });
 }
 
 export function transferSpaceOwnership({ actorUserId, spaceId, targetUserId }) {
@@ -1302,7 +1366,11 @@ spaceRoutes.post("/spaces/:spaceId/invitations", async (req, res) => {
       result.spaceName,
     );
     await publishLifecycleChange(req, result);
-    return res.status(201).json({ invitation: result.invite, emailSent });
+    return res.status(201).json({
+      invitation: result.invite,
+      invitationUrl: buildSpaceInviteUrl(result.token),
+      emailSent,
+    });
   } catch (error) {
     return lifecycleErrorResponse(res, error);
   }
@@ -1335,7 +1403,38 @@ spaceRoutes.post("/spaces/:spaceId/invitations/:inviteId/resend", async (req, re
       result.spaceName,
     );
     await publishLifecycleChange(req, result);
-    return res.json({ invitation: result.invite, emailSent });
+    return res.json({
+      invitation: result.invite,
+      invitationUrl: buildSpaceInviteUrl(result.token),
+      emailSent,
+    });
+  } catch (error) {
+    return lifecycleErrorResponse(res, error);
+  }
+});
+
+spaceRoutes.get("/space-invitations", (req, res) => {
+  try {
+    return res.json({
+      invitations: listPendingSpaceInvitations({ actorUserId: req.user.user_id }),
+    });
+  } catch (error) {
+    return lifecycleErrorResponse(res, error);
+  }
+});
+
+spaceRoutes.post("/space-invitations/:inviteId/accept", async (req, res) => {
+  try {
+    const result = acceptPendingSpaceInvitation({
+      actorUserId: req.user.user_id,
+      inviteId: req.params.inviteId,
+    });
+    await publishLifecycleChange(req, result);
+    return res.json({
+      accepted: true,
+      spaceId: result.spaceId,
+      membershipVersion: result.versions.get(req.user.user_id),
+    });
   } catch (error) {
     return lifecycleErrorResponse(res, error);
   }

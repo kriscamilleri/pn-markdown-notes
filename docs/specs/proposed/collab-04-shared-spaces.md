@@ -3,7 +3,7 @@
 > A shared folder tree is its own CR-SQLite database, replicated in full to every member.
 > Status: proposed
 > Created: 2026-08-16
-> Last updated: 2026-08-16 (final review)
+> Last updated: 2026-08-20
 > Part of [COLLAB-00](collab-00-overview.md) · Soft-depends on [COLLAB-02](collab-02-content-merge.md), [COLLAB-03](collab-03-identity-palette.md)
 
 ---
@@ -31,6 +31,16 @@ permanent silent data loss because the client advances its cursor past them.
 3. Members edit space documents offline; changes replicate through the existing `/sync` path.
 4. Documents can move between a personal tree and a space, deliberately and visibly.
 5. Images, revisions and PDF export work for space documents.
+6. A signed-in user can discover and explicitly accept invitations addressed to their account from
+   Manage Spaces, without needing to recover the original email.
+
+### 2.1 User journeys
+
+| # | Persona | Journey | Acceptance criteria |
+|---|---|---|---|
+| U1 | Invited editor | Opens Manage Spaces, reviews an invitation, and selects **Accept** | Only active, unexpired invitations matching the authenticated account email appear; acceptance adds the space and removes the invitation from the list |
+| U2 | Wrong account | Opens Manage Spaces or attempts to accept another account's invitation | The invitation is not listed and acceptance returns the same neutral invalid-invitation response without adding membership |
+| U3 | Email-link recipient | Opens the tokenized email link and explicitly accepts | Visiting does not auto-accept; the existing hashed, single-use token flow remains supported |
 
 ## Non-goals
 
@@ -167,6 +177,9 @@ Space deletion is a two-step owner action: atomically set `status = 'pending_del
 data for 30 days, then delete the database/uploads in a background job. Account deletion requires
 the owner to transfer or delete every owned space first. Invites expire after seven days, may be
 revoked or resent, and are accepted only by an account matching the normalized invite email.
+Authenticated recipients may list their own active, unexpired invitations and accept by the
+invitation's non-secret management id; acceptance repeats the email and invite-state checks
+transactionally. Discovery responses never contain a raw token.
 
 Initial operational limits are configurable server constants: 20 spaces owned per account, 100
 members per space, 100 joined spaces per account, 10 MiB document body, and 1 GiB uploaded images
@@ -421,6 +434,8 @@ the intermediate duplicate recoverable and auditable.
   `BaseButton`, `pn-table` and the form primitives in
   [ui-design-system.md §3](../../architecture/ui-design-system.md).
 - Invite flow: email + role, sends a hashed single-use token link.
+- Manage Spaces lists invitations addressed to the signed-in account and requires an explicit
+  **Accept** action; the email landing page remains available and never auto-accepts.
 - Member management: role changes and removal, owner only.
 - Every space document shows its space in the metadata bar and in dashboard rows, so "who can see
   this" is never a guess.
@@ -499,7 +514,9 @@ Verify each before merge:
       body- or query-supplied user id
 - [ ] Non-membership returns `404`, not `403` — space existence is not disclosed
 - [ ] `GET /images/:id` query-token path carries the membership check
-- [ ] Invite tokens hashed at rest, expiring, single-use; the raw token appears only in the email
+- [ ] Invite tokens hashed at rest, expiring, and single-use; the raw token appears only in the
+  email or the authenticated owner's immediate create/resend response as a tokenized acceptance
+  URL. Invitation detail/list responses never include it.
 - [ ] Invite emails do not leak space contents or the member list
 - [ ] WebSocket `subscribe` re-authorizes; connect-time auth is not a standing grant
 - [ ] Owner-only operations (role change, removal, deletion) enforced server-side, not just in UI

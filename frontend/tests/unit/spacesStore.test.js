@@ -68,7 +68,11 @@ describe("spacesStore", () => {
 
   it("sends editor-only invitations and refreshes authoritative registry/detail state", async () => {
     const fetchMock = vi.fn()
-      .mockResolvedValueOnce(response(201, { invitation: { id: "invite" }, emailSent: true }))
+      .mockResolvedValueOnce(response(201, {
+        invitation: { id: "invite" },
+        invitationUrl: "https://panino.test/#/spaces/invitations/token",
+        emailSent: true,
+      }))
       .mockResolvedValueOnce(response(200, {
         space: { id: SPACE_ID, name: "Writers", role: "owner" },
         members: [],
@@ -76,13 +80,40 @@ describe("spacesStore", () => {
       }));
     vi.stubGlobal("fetch", fetchMock);
     const store = useSpacesStore();
-    await store.invite(SPACE_ID, "editor@example.test");
+    const result = await store.invite(SPACE_ID, "editor@example.test");
     expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
       email: "editor@example.test",
       role: "editor",
     });
     expect(harness.sync.requestMembershipRefresh).toHaveBeenCalledOnce();
     expect(store.detail.invitations).toHaveLength(1);
+    expect(result.invitationUrl).toBe("https://panino.test/#/spaces/invitations/token");
+  });
+
+  it("loads invitations for the current account and refreshes them after acceptance", async () => {
+    const invitation = {
+      id: "33333333-3333-4333-8333-333333333333",
+      spaceName: "Editorial",
+      role: "editor",
+    };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(response(200, { invitations: [invitation] }))
+      .mockResolvedValueOnce(response(200, { accepted: true, spaceId: SPACE_ID }))
+      .mockResolvedValueOnce(response(200, { invitations: [] }));
+    vi.stubGlobal("fetch", fetchMock);
+    const store = useSpacesStore();
+
+    await store.loadPendingInvitations();
+    expect(store.pendingInvitations).toEqual([invitation]);
+    const accepted = await store.acceptPendingInvitation(invitation.id);
+
+    expect(fetchMock.mock.calls[1][0]).toContain(
+      `/space-invitations/${invitation.id}/accept`,
+    );
+    expect(fetchMock.mock.calls[1][1].method).toBe("POST");
+    expect(accepted).toMatchObject({ accepted: true, spaceId: SPACE_ID });
+    expect(store.pendingInvitations).toEqual([]);
+    expect(harness.sync.requestMembershipRefresh).toHaveBeenCalledOnce();
   });
 
   it("removes the revoked local scope before refreshing after leave", async () => {
@@ -121,4 +152,3 @@ describe("spacesStore", () => {
     expect(store.error).not.toContain("membership");
   });
 });
-

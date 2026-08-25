@@ -13,6 +13,9 @@ export const useSpacesStore = defineStore("spacesStore", () => {
   const detail = ref(null);
   const loading = ref(false);
   const error = ref("");
+  const pendingInvitations = ref([]);
+  const pendingInvitationsLoading = ref(false);
+  const pendingInvitationsError = ref("");
   const syncStore = useSyncStore();
   const authStore = useAuthStore();
 
@@ -52,6 +55,22 @@ export const useSpacesStore = defineStore("spacesStore", () => {
 
   async function refreshRegistry() {
     await syncStore.requestMembershipRefresh();
+  }
+
+  /** Loads invitations addressed to the signed-in account without exposing raw tokens. */
+  async function loadPendingInvitations() {
+    pendingInvitationsLoading.value = true;
+    pendingInvitationsError.value = "";
+    try {
+      const result = await request("/space-invitations");
+      pendingInvitations.value = result.invitations || [];
+      return pendingInvitations.value;
+    } catch (failure) {
+      pendingInvitationsError.value = failure.message;
+      throw failure;
+    } finally {
+      pendingInvitationsLoading.value = false;
+    }
   }
 
   async function loadDetail(spaceId) {
@@ -161,6 +180,17 @@ export const useSpacesStore = defineStore("spacesStore", () => {
     return result;
   }
 
+  /** Accepts an invitation selected on Manage Spaces, then refreshes local discovery state. */
+  async function acceptPendingInvitation(inviteId) {
+    const result = await request(
+      `/space-invitations/${encodeURIComponent(inviteId)}/accept`,
+      { method: "POST" },
+    );
+    await refreshRegistry();
+    await loadPendingInvitations();
+    return result;
+  }
+
   function clearDetail() {
     detail.value = null;
     error.value = "";
@@ -171,6 +201,10 @@ export const useSpacesStore = defineStore("spacesStore", () => {
     detail,
     loading,
     error,
+    pendingInvitations,
+    pendingInvitationsLoading,
+    pendingInvitationsError,
+    loadPendingInvitations,
     loadDetail,
     createSpace,
     renameSpace,
@@ -182,7 +216,7 @@ export const useSpacesStore = defineStore("spacesStore", () => {
     leaveSpace,
     requestDeletion,
     acceptInvitation,
+    acceptPendingInvitation,
     clearDetail,
   };
 });
-
