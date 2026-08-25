@@ -9,6 +9,9 @@ import {
     buildFolderTree,
     validateImportLimits,
     IMPORT_LIMITS,
+    normalizeLocalImagePath,
+    collectLocalMarkdownImagePaths,
+    replaceLocalMarkdownImageReferences,
 } from '../../src/utils/importUtils.js';
 
 // ── sanitizePathSegments ─────────────────────────────────────
@@ -398,5 +401,53 @@ describe('IMPORT_LIMITS', () => {
         expect(IMPORT_LIMITS.MAX_TOTAL_BYTES).toBe(500 * 1024 * 1024);
         expect(IMPORT_LIMITS.MAX_FILE_BYTES).toBe(1 * 1024 * 1024);
         expect(IMPORT_LIMITS.MAX_DIRECTORIES).toBe(1_000);
+    });
+
+    describe('local Markdown image references', () => {
+        it('normalizes relative image paths for a selected directory', () => {
+            expect(normalizeLocalImagePath('./evidence/cafe\u0301.png')).toEqual({
+                path: 'evidence/café.png',
+                segments: ['evidence', 'café.png'],
+            });
+        });
+
+        it.each([
+            '/etc/passwd',
+            '\\\\server\\share\\image.png',
+            '../outside.png',
+            'assets/../../outside.png',
+            'https://example.test/image.png',
+            'data:image/png;base64,abc',
+            'image\x00.png',
+        ])('rejects unsafe local image destination %s', (destination) => {
+            expect(normalizeLocalImagePath(destination)).toBeNull();
+        });
+
+        it('collects unique valid inline image paths and reports unsafe destinations', () => {
+            const content = [
+                '![One](evidence/one.png)',
+                '![Duplicate](./evidence/one.png)',
+                '![Two](<evidence/two image.png>)',
+                '![External](https://example.test/image.png)',
+            ].join('\n');
+
+            expect(collectLocalMarkdownImagePaths(content)).toEqual({
+                paths: ['evidence/one.png', 'evidence/two image.png'],
+                skippedItems: [{
+                    path: 'https://example.test/image.png',
+                    reason: 'image path is external, absolute, or unsafe',
+                }],
+            });
+        });
+
+        it('rewrites only successful local image uploads and preserves title syntax', () => {
+            const content = '![One](evidence/one.png "caption")\n![Two](<evidence/two.png>)\n![Remote](https://example.test/remote.png)';
+            const rewritten = replaceLocalMarkdownImageReferences(content, new Map([
+                ['evidence/one.png', '/images/image-one'],
+                ['evidence/two.png', '/images/image-two'],
+            ]));
+
+            expect(rewritten).toBe('![One](/images/image-one "caption")\n![Two](/images/image-two)\n![Remote](https://example.test/remote.png)');
+        });
     });
 });

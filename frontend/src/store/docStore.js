@@ -234,6 +234,8 @@ ${DOCUMENT_COLUMNS}
     importStackEditData: importExportStore.importStackEditData,
     importMarkdownFiles: importExportStore.importMarkdownFiles,
     importMarkdownDirectory: importExportStore.importMarkdownDirectory,
+    listMarkdownDocumentsInDirectory: importExportStore.listMarkdownDocumentsInDirectory,
+    importDocumentWithLinkedImages: importExportStore.importDocumentWithLinkedImages,
     importZipArchive: importExportStore.importZipArchive,
 
     updateStyle: markdownStore.updateStyle,

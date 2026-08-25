@@ -28,6 +28,14 @@
             />
 
             <OptionCard
+                :icon="Image"
+                title="Document with Linked Images"
+                description="Choose a local folder, then import one Markdown document and upload its linked images."
+                data-testid="import-mode-document-images"
+                @click="selectMode('document-images')"
+            />
+
+            <OptionCard
                 :icon="Archive"
                 title="ZIP Archive (.zip)"
                 description="Import folders and .md files from a .zip archive, update matching documents, and restore bundled images from Panino exports."
@@ -124,6 +132,54 @@
             >
                 {{ selectedFiles.length }} file{{ selectedFiles.length !== 1 ? 's' : '' }} found in directory
             </p>
+        </div>
+
+        <!-- ── Document with linked images mode ── -->
+        <div v-else-if="activeMode === 'document-images'" class="space-y-4">
+            <div
+                v-if="!fileSystemAccessSupported"
+                class="pn-alert pn-alert-error"
+                data-testid="import-modal-filesystem-unsupported"
+            >
+                <AlertCircle class="mt-0.5 h-4 w-4 shrink-0" />
+                <p>This import requires a Chromium browser with File System Access API support.</p>
+            </div>
+
+            <template v-else>
+                <div class="rounded-lg border-2 border-dashed border-gray-300 p-8 text-center">
+                    <FolderOpen class="mx-auto h-10 w-10 text-gray-400" />
+                    <p class="mt-2 font-medium text-gray-700">Choose the folder containing the document and images</p>
+                    <p class="mt-1 pn-body">Only linked images within this folder can be uploaded.</p>
+                    <BaseButton
+                        variant="primary"
+                        size="md"
+                        class="mt-4"
+                        data-testid="import-modal-choose-document-folder-button"
+                        @click="chooseDocumentSourceFolder"
+                    >
+                        Choose Folder
+                    </BaseButton>
+                </div>
+
+                <div v-if="linkedDocuments.length" class="space-y-2">
+                    <label class="pn-label" for="linked-document-select">Document to import</label>
+                    <select
+                        id="linked-document-select"
+                        v-model="selectedLinkedDocumentPath"
+                        class="pn-input"
+                        data-testid="import-modal-linked-document-select"
+                    >
+                        <option disabled value="">Choose a document</option>
+                        <option v-for="document in linkedDocuments" :key="document.path" :value="document.path">
+                            {{ document.path }}
+                        </option>
+                    </select>
+                </div>
+
+                <p v-else-if="linkedSourceDirectory" class="pn-body">
+                    No Markdown documents were found in {{ linkedSourceDirectory.name }}.
+                </p>
+            </template>
         </div>
 
         <!-- ── ZIP mode ── -->
@@ -303,11 +359,11 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, markRaw } from 'vue'
 import { useDocStore } from '@/store/docStore'
 import { useUiStore } from '@/store/uiStore'
 import { isMarkdownFile } from '@/utils/importUtils'
-import { Upload, AlertCircle, FileText, FolderOpen, Archive, Braces } from 'lucide-vue-next'
+import { Upload, AlertCircle, FileText, FolderOpen, Archive, Braces, Image } from 'lucide-vue-next'
 import BaseModal from '@/components/BaseModal.vue'
 import BaseButton from '@/components/BaseButton.vue'
 import OptionCard from '@/components/OptionCard.vue'
@@ -341,6 +397,12 @@ const mdFileInput = ref(null)
 // Directory mode
 const dirInput = ref(null)
 
+// Document with linked images mode
+const fileSystemAccessSupported = typeof window !== 'undefined' && typeof window.showDirectoryPicker === 'function'
+const linkedSourceDirectory = ref(null)
+const linkedDocuments = ref([])
+const selectedLinkedDocumentPath = ref('')
+
 // ZIP mode
 const selectedZipFile = ref(null)
 const zipFileInput = ref(null)
@@ -353,6 +415,7 @@ const jsonFileInput = ref(null)
 const modeTitles = {
     markdown: 'Import Markdown Files',
     directory: 'Import Markdown Folder',
+    'document-images': 'Import Document with Linked Images',
     zip: 'Import ZIP Archive',
     json: 'Import JSON Backup',
 }
@@ -364,6 +427,7 @@ const canImport = computed(() => {
     switch (activeMode.value) {
         case 'markdown': return selectedFiles.value.length > 0
         case 'directory': return selectedFiles.value.length > 0
+        case 'document-images': return Boolean(selectedLinkedDocumentPath.value)
         case 'zip': return selectedZipFile.value !== null
         case 'json': return jsonData.value.trim().length > 0
         default: return false
@@ -394,6 +458,9 @@ function handleClose() {
 function resetSelections() {
     selectedFiles.value = []
     selectedZipFile.value = null
+    linkedSourceDirectory.value = null
+    linkedDocuments.value = []
+    selectedLinkedDocumentPath.value = ''
     jsonData.value = ''
     isStackEditFormat.value = false
     progressCurrent.value = 0
@@ -428,6 +495,28 @@ function handleMarkdownFileSelect(e) {
 function handleDirectorySelect(e) {
     selectedFiles.value = Array.from(e.target.files)
     error.value = ''
+}
+
+async function chooseDocumentSourceFolder() {
+    error.value = ''
+
+    try {
+        const directoryHandle = await window.showDirectoryPicker({ mode: 'read' })
+        const documents = await docStore.listMarkdownDocumentsInDirectory(directoryHandle)
+        linkedSourceDirectory.value = markRaw(directoryHandle)
+        linkedDocuments.value = documents.map(document => ({
+            ...document,
+            handle: markRaw(document.handle),
+        }))
+        selectedLinkedDocumentPath.value = documents.length === 1 ? documents[0].path : ''
+
+        if (documents.length === 0) {
+            error.value = 'No .md documents were found in the selected folder.'
+        }
+    } catch (err) {
+        if (err?.name === 'AbortError') return
+        error.value = `Unable to read the selected folder: ${err.message || 'Unknown error'}`
+    }
 }
 
 // ── ZIP handlers ─────────────────────────────────────────────
@@ -490,6 +579,7 @@ function buildImportToastMessage(result) {
     if (result.updated) parts.push(`${result.updated} updated`)
     if (result.unchanged) parts.push(`${result.unchanged} unchanged`)
     if (result.foldersCreated) parts.push(`${result.foldersCreated} folder${result.foldersCreated !== 1 ? 's' : ''} created`)
+    if (result.imagesImported) parts.push(`${result.imagesImported} image${result.imagesImported !== 1 ? 's' : ''} uploaded`)
 
     return parts.length ? `Import complete: ${parts.join(', ')}.` : 'Nothing changed during import.'
 }
@@ -527,6 +617,19 @@ async function doImport(importOptions = {}) {
             }
             case 'directory': {
                 result = await docStore.importMarkdownDirectory(selectedFiles.value, onProgress, importOptions)
+                break
+            }
+            case 'document-images': {
+                const document = linkedDocuments.value.find(item => item.path === selectedLinkedDocumentPath.value)
+                if (!document || !linkedSourceDirectory.value) {
+                    throw new Error('Choose a source folder and a Markdown document to import.')
+                }
+                result = await docStore.importDocumentWithLinkedImages(
+                    linkedSourceDirectory.value,
+                    document,
+                    onProgress,
+                    importOptions
+                )
                 break
             }
             case 'zip': {

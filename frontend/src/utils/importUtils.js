@@ -187,3 +187,90 @@ export function validateImportLimits(fileCount, dirCount, totalBytes) {
         throw new Error(`This import exceeds the maximum total size of 500 MB.`);
     }
 }
+
+const MARKDOWN_IMAGE_REFERENCE_PATTERN = /(!\[[^\]]*]\(\s*)(?:<([^>]+)>|([^\s)]+))/g;
+
+/**
+ * Normalize a Markdown image destination that is safe to resolve from a
+ * user-selected directory. External URLs, absolute paths, control characters,
+ * and parent-directory traversal are rejected.
+ *
+ * @param {string} destination
+ * @returns {{ path: string, segments: string[] }|null}
+ */
+export function normalizeLocalImagePath(destination) {
+    if (!destination || typeof destination !== 'string') return null;
+
+    const normalized = destination.normalize('NFC').trim();
+    if (
+        !normalized
+        || /[\x00-\x1f]/.test(normalized)
+        || normalized.startsWith('/')
+        || normalized.startsWith('\\')
+        || normalized.startsWith('//')
+        || /^[a-z][a-z0-9+.-]*:/i.test(normalized)
+    ) {
+        return null;
+    }
+
+    const segments = normalized.split(/[/\\]/);
+    if (segments.some(segment => segment === '..')) return null;
+
+    const safeSegments = segments.filter(segment => segment && segment !== '.');
+    if (safeSegments.length === 0) return null;
+
+    return {
+        path: safeSegments.join('/'),
+        segments: safeSegments,
+    };
+}
+
+/**
+ * Collect valid local image destinations from inline Markdown image references.
+ *
+ * @param {string} content
+ * @returns {{ paths: string[], skippedItems: Array<{path: string, reason: string}> }}
+ */
+export function collectLocalMarkdownImagePaths(content) {
+    const paths = new Set();
+    const skippedItems = [];
+
+    if (!content || typeof content !== 'string') {
+        return { paths: [], skippedItems };
+    }
+
+    for (const match of content.matchAll(MARKDOWN_IMAGE_REFERENCE_PATTERN)) {
+        const destination = match[2] ?? match[3];
+        const normalized = normalizeLocalImagePath(destination);
+        if (!normalized) {
+            skippedItems.push({
+                path: String(destination || ''),
+                reason: 'image path is external, absolute, or unsafe',
+            });
+            continue;
+        }
+        paths.add(normalized.path);
+    }
+
+    return { paths: [...paths], skippedItems };
+}
+
+/**
+ * Rewrite successfully imported relative image destinations in Markdown.
+ *
+ * @param {string} content
+ * @param {Map<string, string>} imageUrlByPath normalized path to Panino image URL
+ * @returns {string}
+ */
+export function replaceLocalMarkdownImageReferences(content, imageUrlByPath) {
+    if (!content || !(imageUrlByPath instanceof Map) || imageUrlByPath.size === 0) {
+        return content;
+    }
+
+    return content.replace(MARKDOWN_IMAGE_REFERENCE_PATTERN, (match, prefix, bracketedDestination, bareDestination) => {
+        const destination = bracketedDestination ?? bareDestination;
+        const normalized = normalizeLocalImagePath(destination);
+        const imageUrl = normalized && imageUrlByPath.get(normalized.path);
+        return imageUrl ? `${prefix}${imageUrl}` : match;
+    });
+}

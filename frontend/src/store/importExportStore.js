@@ -15,6 +15,11 @@ import {
     buildFolderTree,
     validateImportLimits,
     IMPORT_LIMITS,
+    extractTitleFromFrontMatter,
+    titleFromFilename,
+    normalizeLocalImagePath,
+    collectLocalMarkdownImagePaths,
+    replaceLocalMarkdownImageReferences,
 } from '../utils/importUtils';
 
 const API_URL = import.meta.env.VITE_API_SERVICE_URL || '';
@@ -190,6 +195,10 @@ export const useImportExportStore = defineStore('importExportStore', () => {
      * @returns {Promise<string>}
      */
     function readFileAsText(file) {
+        if (typeof file?.text === 'function') {
+            return file.text();
+        }
+
         return new Promise((resolve, reject) => {
             const reader = new FileReader();
             reader.onload = () => resolve(reader.result);
@@ -574,6 +583,133 @@ export const useImportExportStore = defineStore('importExportStore', () => {
         const tree = buildFolderTree(entries);
         validateImportLimits(tree.notes.length, tree.folders.size, totalBytes);
         return { ...tree, skippedItems };
+    }
+
+    async function getFileHandleAtPath(directoryHandle, segments) {
+        let currentDirectory = directoryHandle;
+
+        for (const segment of segments.slice(0, -1)) {
+            currentDirectory = await currentDirectory.getDirectoryHandle(segment);
+        }
+
+        return currentDirectory.getFileHandle(segments[segments.length - 1]);
+    }
+
+    /**
+     * List Markdown document handles inside a user-selected directory.
+     *
+     * @param {FileSystemDirectoryHandle} directoryHandle
+     * @returns {Promise<Array<{handle: FileSystemFileHandle, path: string}>>}
+     */
+    async function listMarkdownDocumentsInDirectory(directoryHandle) {
+        const documents = [];
+        let fileCount = 0;
+        let directoryCount = 0;
+
+        async function visitDirectory(handle, parentPath = '') {
+            for await (const [name, entry] of handle.entries()) {
+                fileCount += 1;
+                validateImportLimits(fileCount, directoryCount);
+
+                if (isHiddenSegment(name)) continue;
+
+                const path = parentPath ? `${parentPath}/${name}` : name;
+                if (entry.kind === 'directory') {
+                    directoryCount += 1;
+                    validateImportLimits(fileCount, directoryCount);
+                    await visitDirectory(entry, path);
+                } else if (entry.kind === 'file' && isMarkdownFile(name)) {
+                    documents.push({ handle: entry, path });
+                }
+            }
+        }
+
+        await visitDirectory(directoryHandle);
+        return documents;
+    }
+
+    /**
+     * Import one Markdown document and its locally-linked image files from a
+     * directory explicitly granted by the user's browser picker.
+     *
+     * @param {FileSystemDirectoryHandle} directoryHandle
+     * @param {{handle: FileSystemFileHandle, path: string}|FileSystemFileHandle} documentReference
+     * @param {(current: number, total: number) => void|null} onProgress
+     * @param {object} options
+     * @returns {Promise<object>}
+     */
+    async function importDocumentWithLinkedImages(directoryHandle, documentReference, onProgress = null, options = {}) {
+        const documentHandle = documentReference?.handle || documentReference;
+        const documentPath = documentReference?.path || documentHandle?.name;
+        if (!directoryHandle || !documentHandle) {
+            throw new Error('Choose a source folder and a Markdown document to import.');
+        }
+        if (!isMarkdownFile(documentHandle.name)) {
+            throw new Error('The selected document must be a .md file.');
+        }
+
+        const documentFile = await documentHandle.getFile();
+        if (documentFile.size > IMPORT_LIMITS.MAX_FILE_BYTES) {
+            throw new Error('The selected document is larger than 1 MB.');
+        }
+
+        const originalContent = await readFileAsText(documentFile);
+        const imageReferences = collectLocalMarkdownImagePaths(originalContent);
+        const skippedItems = [...imageReferences.skippedItems];
+        const imageUrlByPath = new Map();
+        const authStore = useAuthStore();
+        const documentSegments = sanitizePathSegments(documentPath);
+        const documentDirectorySegments = documentSegments.slice(0, -1);
+        let totalBytes = documentFile.size;
+
+        if (!authStore.isAuthenticated || !authStore.token || !syncStore.isOnline) {
+            for (const path of imageReferences.paths) {
+                skippedItems.push(createSkippedItem(path, 'linked image import requires an online signed-in session'));
+            }
+        } else {
+            for (let index = 0; index < imageReferences.paths.length; index++) {
+                const path = imageReferences.paths[index];
+                const normalized = normalizeLocalImagePath(path);
+
+                try {
+                    const imageHandle = await getFileHandleAtPath(
+                        directoryHandle,
+                        [...documentDirectorySegments, ...normalized.segments]
+                    );
+                    const imageFile = await imageHandle.getFile();
+                    if (imageFile.size > IMPORT_LIMITS.MAX_FILE_BYTES) {
+                        skippedItems.push(createSkippedItem(path, 'larger than 1 MB'));
+                        continue;
+                    }
+
+                    totalBytes += imageFile.size;
+                    validateImportLimits(index + 2, 0, totalBytes);
+                    const payload = await uploadImportedImage(imageFile, imageFile.name, authStore.token);
+                    if (!payload?.id) {
+                        throw new Error('image upload did not return an image id');
+                    }
+                    imageUrlByPath.set(path, buildImageUrl(payload.id));
+                } catch (error) {
+                    skippedItems.push(createSkippedItem(path, error.message || 'failed to import linked image'));
+                } finally {
+                    if (onProgress) onProgress(index + 1, imageReferences.paths.length);
+                }
+            }
+        }
+
+        const tree = {
+            folderMap: new Map(),
+            notes: [{
+                title: extractTitleFromFrontMatter(originalContent) || titleFromFilename(documentFile.name),
+                content: replaceLocalMarkdownImageReferences(originalContent, imageUrlByPath),
+                folderPath: null,
+            }],
+            skippedItems,
+        };
+
+        const result = await applyImportTree(tree, { ...options, onProgress: null });
+        result.imagesImported = imageUrlByPath.size;
+        return result;
     }
 
     async function buildZipImportTree(file) {
@@ -978,6 +1114,8 @@ export const useImportExportStore = defineStore('importExportStore', () => {
         importStackEditData,
         importMarkdownFiles,
         importMarkdownDirectory,
+        listMarkdownDocumentsInDirectory,
+        importDocumentWithLinkedImages,
         importZipArchive,
     };
 });
